@@ -1,0 +1,50 @@
+# Remote Claude Configuration
+# Copy to ~/.config/remote-claude/config.yaml
+
+docker:
+  # Docker image name for Claude containers
+  image: remote-claude:latest
+
+network:
+  # Network isolation mode: "allowlist", "bridge", or "none"
+  mode: allowlist
+
+  # Allowed domains when mode is "allowlist"
+  allowed_domains:
+    - github.com
+    - api.github.com
+    - pypi.org
+    - files.pythonhosted.org
+    - registry.npmjs.org
+    - api.anthropic.com
+
+credentials:
+  # Paths to credential files/directories (mounted read-only into containers)
+  anthropic: ~/.anthropic
+  git: ~/.gitconfig
+  ssh: ~/.ssh
+  claude: ~/.claude
+
+notifications:
+  # Enable webhook notifications
+  enabled: false
+
+  # Webhook URL for notifications when Claude needs input
+  # Supported services:
+  #   - ntfy.sh:    https://ntfy.sh/your-topic
+  #   - Slack:      https://hooks.slack.com/services/xxx/yyy/zzz
+  #   - Discord:    https://discord.com/api/webhooks/xxx/yyy
+  #   - Pushover:   https://api.pushover.net/1/messages.json
+  #   - Generic:    Any URL accepting JSON POST
+  webhook_url: null
+
+  # Idle detection settings (used by watch.py)
+  idle_threshold: 300      # Seconds before considering session idle (5 min)
+  check_interval: 30       # Seconds between idle checks
+  min_notification_gap: 60 # Minimum seconds between notifications
+
+tmux:
+  # Prefix for tmux session names
+  session_prefix: rc
+  # Tmux socket name (allows isolation from other tmux sessions)
+  socket_name: remote-claude
