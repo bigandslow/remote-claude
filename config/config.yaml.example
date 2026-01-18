@@ -25,6 +25,14 @@ credentials:
   ssh: ~/.ssh
   claude: ~/.claude
 
+  # Dedicated Claude credentials (optional, recommended for YOLO mode)
+  # Run ./setup/credentials-setup.sh to configure these
+  # If set, these are used instead of personal credentials above
+  #
+  # claude_git: ~/.config/remote-claude/credentials/git/.gitconfig
+  # claude_ssh: ~/.config/remote-claude/credentials/git/.ssh
+  # claude_gcp: ~/.config/remote-claude/credentials/gcp/claude-sa-key.json
+
 notifications:
   # Enable webhook notifications
   enabled: false

@@ -108,15 +108,35 @@ class DockerManager:
         ]
 
         # Mount credentials read-only
+        # Use dedicated Claude credentials if configured, otherwise fall back to personal
         creds = self.config.credentials
+
         if creds.anthropic.exists():
             args.extend(["-v", f"{creds.anthropic}:/home/claude/.anthropic:ro"])
-        if creds.git.exists():
-            args.extend(["-v", f"{creds.git}:/home/claude/.gitconfig:ro"])
-        if creds.ssh.exists():
-            args.extend(["-v", f"{creds.ssh}:/home/claude/.ssh:ro"])
+
+        # Git config - prefer dedicated claude_git if set
+        git_config = creds.claude_git if creds.claude_git and creds.claude_git.exists() else creds.git
+        if git_config.exists():
+            args.extend(["-v", f"{git_config}:/home/claude/.gitconfig:ro"])
+
+        # SSH keys - prefer dedicated claude_ssh if set
+        ssh_dir = creds.claude_ssh if creds.claude_ssh and creds.claude_ssh.exists() else creds.ssh
+        if ssh_dir.exists():
+            args.extend(["-v", f"{ssh_dir}:/home/claude/.ssh:ro"])
+
+        # Claude settings (mounted to separate path, merged in entrypoint)
         if creds.claude.exists():
-            args.extend(["-v", f"{creds.claude}:/home/claude/.claude:ro"])
+            args.extend(["-v", f"{creds.claude}:/home/claude/.claude-host:ro"])
+
+        # GCP credentials - mount service account key if configured
+        if creds.claude_gcp and creds.claude_gcp.exists():
+            args.extend(["-v", f"{creds.claude_gcp}:/home/claude/.config/gcloud/application_default_credentials.json:ro"])
+            args.extend(["-e", "GOOGLE_APPLICATION_CREDENTIALS=/home/claude/.config/gcloud/application_default_credentials.json"])
+
+        # Mount safety hooks for YOLO mode protection
+        hooks_dir = Path(__file__).parent.parent / "hooks"
+        if hooks_dir.exists():
+            args.extend(["-v", f"{hooks_dir}:/home/claude/.rc-hooks:ro"])
 
         # Network mode
         if self.config.network.mode == "none":

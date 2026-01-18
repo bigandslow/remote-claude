@@ -1,11 +1,52 @@
 #!/bin/bash
 # Remote Claude container entrypoint
-# Starts Claude Code in YOLO mode with optional initial prompt
+# Starts Claude Code in YOLO mode with safety protections
 
 set -e
 
 # Ensure we're in the workspace
 cd /workspace
+
+# Set up Claude settings with safety hook
+setup_safety_hook() {
+    local claude_dir="/home/claude/.claude"
+    local settings_file="$claude_dir/settings.json"
+    local host_settings="/home/claude/.claude-host/settings.json"
+    local hook_path="/home/claude/.rc-hooks/safety.py"
+
+    # Create claude config directory
+    mkdir -p "$claude_dir"
+
+    # Start with host settings if they exist, otherwise empty object
+    if [ -f "$host_settings" ]; then
+        cp "$host_settings" "$settings_file"
+    else
+        echo '{}' > "$settings_file"
+    fi
+
+    # Add safety hook if it exists and jq is available
+    if [ -f "$hook_path" ] && command -v jq &> /dev/null; then
+        local hook_cmd="python3 $hook_path"
+
+        # Check if hook already configured
+        if ! grep -q "safety.py" "$settings_file" 2>/dev/null; then
+            # Add the PreToolUse hook for Bash commands
+            local tmp_file=$(mktemp)
+            jq --arg hook "$hook_cmd" '
+                .hooks //= {} |
+                .hooks.PreToolUse //= [] |
+                .hooks.PreToolUse += [{
+                    "matcher": "Bash",
+                    "hooks": [$hook]
+                }]
+            ' "$settings_file" > "$tmp_file"
+            mv "$tmp_file" "$settings_file"
+        fi
+    fi
+}
+
+# Configure safety protections
+setup_safety_hook
 
 # If a prompt was passed, use it; otherwise start interactive
 if [ -n "$RC_PROMPT" ]; then

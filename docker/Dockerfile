@@ -32,6 +32,10 @@ RUN mkdir -p /etc/apt/keyrings \
 # Install Claude Code CLI globally
 RUN npm install -g @anthropic-ai/claude-code
 
+# Note: gcloud CLI not installed to keep image small (~500MB savings)
+# GCP authentication works via GOOGLE_APPLICATION_CREDENTIALS env var
+# which points to the mounted service account key
+
 # Create non-root user for running Claude
 RUN useradd -m -s /bin/bash claude \
     && echo "claude ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
@@ -44,6 +48,7 @@ RUN mkdir -p /home/claude/.anthropic \
     /home/claude/.ssh \
     /home/claude/.gitconfig \
     /home/claude/.claude \
+    /home/claude/.config/gcloud \
     && chown -R claude:claude /home/claude
 
 # Copy entrypoint script (must be done as root)

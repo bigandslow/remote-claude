@@ -37,10 +37,16 @@ class NetworkConfig:
 class CredentialsConfig:
     """Credential mount paths."""
 
+    # Personal credentials (fallback)
     anthropic: Path = field(default_factory=lambda: Path.home() / ".anthropic")
     git: Path = field(default_factory=lambda: Path.home() / ".gitconfig")
     ssh: Path = field(default_factory=lambda: Path.home() / ".ssh")
     claude: Path = field(default_factory=lambda: Path.home() / ".claude")
+
+    # Dedicated Claude credentials (optional, used if configured)
+    claude_git: Optional[Path] = None      # Git config for bot account
+    claude_ssh: Optional[Path] = None      # SSH keys for bot account
+    claude_gcp: Optional[Path] = None      # GCP service account key
 
 
 @dataclass
@@ -113,6 +119,13 @@ def load_config() -> Config:
             config.credentials.ssh = Path(cred_data["ssh"]).expanduser()
         if "claude" in cred_data:
             config.credentials.claude = Path(cred_data["claude"]).expanduser()
+        # Dedicated Claude credentials (optional)
+        if "claude_git" in cred_data:
+            config.credentials.claude_git = Path(cred_data["claude_git"]).expanduser()
+        if "claude_ssh" in cred_data:
+            config.credentials.claude_ssh = Path(cred_data["claude_ssh"]).expanduser()
+        if "claude_gcp" in cred_data:
+            config.credentials.claude_gcp = Path(cred_data["claude_gcp"]).expanduser()
 
     # Notifications config
     if "notifications" in data:
@@ -153,6 +166,9 @@ def save_config(config: Config) -> None:
             "git": str(config.credentials.git),
             "ssh": str(config.credentials.ssh),
             "claude": str(config.credentials.claude),
+            **({"claude_git": str(config.credentials.claude_git)} if config.credentials.claude_git else {}),
+            **({"claude_ssh": str(config.credentials.claude_ssh)} if config.credentials.claude_ssh else {}),
+            **({"claude_gcp": str(config.credentials.claude_gcp)} if config.credentials.claude_gcp else {}),
         },
         "notifications": {
             "webhook_url": config.notifications.webhook_url,

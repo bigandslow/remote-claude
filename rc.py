@@ -321,6 +321,116 @@ class RemoteClaude:
             print("Build failed.")
             return 1
 
+    def teleport(
+        self,
+        workspace: str,
+        attach: bool = True,
+        force: bool = False,
+    ) -> int:
+        """Teleport an existing Claude session into the framework.
+
+        Finds any running Claude processes in the workspace, stops them,
+        and starts a new session with --continue to resume the conversation.
+
+        Args:
+            workspace: Path to the workspace
+            attach: Whether to attach to the session after starting
+            force: Skip confirmation prompts
+
+        Returns:
+            Exit code
+        """
+        import subprocess
+
+        workspace_path = Path(workspace).expanduser().resolve()
+
+        if not workspace_path.exists():
+            print(f"Error: Workspace path does not exist: {workspace_path}")
+            return 1
+
+        # Find Claude processes running in this workspace
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", f"claude.*{workspace_path}"],
+                capture_output=True,
+                text=True,
+            )
+            pids = result.stdout.strip().split("\n") if result.stdout.strip() else []
+        except Exception:
+            pids = []
+
+        # Also check for claude processes with cwd in workspace
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "claude"],
+                capture_output=True,
+                text=True,
+            )
+            if result.stdout.strip():
+                all_claude_pids = result.stdout.strip().split("\n")
+                for pid in all_claude_pids:
+                    try:
+                        # Check if process cwd matches workspace
+                        cwd_result = subprocess.run(
+                            ["lsof", "-p", pid, "-Fn"],
+                            capture_output=True,
+                            text=True,
+                        )
+                        if str(workspace_path) in cwd_result.stdout:
+                            if pid not in pids:
+                                pids.append(pid)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        pids = [p for p in pids if p]  # Remove empty strings
+
+        if pids:
+            print(f"Found {len(pids)} Claude process(es) in {workspace_path}")
+            for pid in pids:
+                try:
+                    result = subprocess.run(
+                        ["ps", "-p", pid, "-o", "pid,command"],
+                        capture_output=True,
+                        text=True,
+                    )
+                    print(f"  {result.stdout.strip().split(chr(10))[-1][:80]}")
+                except Exception:
+                    print(f"  PID {pid}")
+
+            if not force:
+                confirm = input("\nStop these processes and teleport to framework? [y/N] ")
+                if confirm.lower() != "y":
+                    print("Cancelled.")
+                    return 0
+
+            # Kill the processes
+            for pid in pids:
+                try:
+                    subprocess.run(["kill", pid], check=False)
+                    print(f"Stopped process {pid}")
+                except Exception as e:
+                    print(f"Warning: Could not stop process {pid}: {e}")
+
+            # Wait a moment for processes to stop
+            time.sleep(1)
+        else:
+            print(f"No running Claude processes found in {workspace_path}")
+            if not force:
+                confirm = input("Continue with --continue to resume last session? [Y/n] ")
+                if confirm.lower() == "n":
+                    print("Cancelled.")
+                    return 0
+
+        # Start new session with --continue
+        print(f"\nTeleporting session to framework...")
+        return self.start(
+            workspace=str(workspace_path),
+            attach=attach,
+            continue_session=True,
+        )
+
 
 def main():
     """Main entry point."""
@@ -331,6 +441,8 @@ def main():
 Examples:
   rc start ~/projects/myapp          Start a new Claude session
   rc start ~/projects/myapp -p "Fix the bug in auth.py"
+  rc start ~/projects/myapp -c       Continue previous conversation
+  rc teleport ~/projects/myapp       Move existing session into framework
   rc list                            List active sessions
   rc attach myapp                    Attach to a session
   rc kill myapp                      Kill a session
@@ -388,6 +500,21 @@ Examples:
     # build command
     subparsers.add_parser("build", help="Build Docker image")
 
+    # teleport command
+    teleport_parser = subparsers.add_parser(
+        "teleport", aliases=["tp"],
+        help="Move existing Claude session into framework"
+    )
+    teleport_parser.add_argument("workspace", help="Path to workspace with existing session")
+    teleport_parser.add_argument(
+        "--no-attach", action="store_true",
+        help="Don't attach to session after starting"
+    )
+    teleport_parser.add_argument(
+        "-f", "--force", action="store_true",
+        help="Skip confirmation prompts"
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -420,6 +547,12 @@ Examples:
         return app.logs(args.session_id, tail=args.tail, follow=args.follow)
     elif args.command == "build":
         return app.build()
+    elif args.command in ("teleport", "tp"):
+        return app.teleport(
+            workspace=args.workspace,
+            attach=not args.no_attach,
+            force=args.force,
+        )
 
     return 0
 

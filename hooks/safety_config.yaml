@@ -1,0 +1,158 @@
+# Safety Hook Configuration
+#
+# Customize blocked and escalated command patterns.
+# This file is optional - if not present, built-in patterns are used.
+#
+# Pattern format:
+#   - pattern: "regex pattern"
+#     reason: "Human-readable explanation"
+#
+# Patterns use Python regex with IGNORECASE and MULTILINE flags.
+
+# Commands that will be BLOCKED (Claude cannot proceed)
+# Use for clearly destructive commands that should never run unattended
+blocked:
+
+  # Git force operations - these can overwrite history
+  git_force:
+    - pattern: "git\\s+push\\s+.*--force"
+      reason: "Force push can overwrite remote history"
+    - pattern: "git\\s+push\\s+-f\\s"
+      reason: "Force push can overwrite remote history"
+    - pattern: "git\\s+push\\s+--force-with-lease"
+      reason: "Force push can overwrite remote history"
+
+  # Git destructive commands
+  git_destructive:
+    - pattern: "git\\s+reset\\s+--hard"
+      reason: "Hard reset discards uncommitted changes"
+    - pattern: "git\\s+clean\\s+-fd"
+      reason: "Clean -fd deletes untracked files"
+    - pattern: "git\\s+branch\\s+-[dD]\\s+(main|master)\\b"
+      reason: "Deleting main/master branch"
+
+  # Dangerous filesystem operations
+  filesystem:
+    - pattern: "rm\\s+-rf\\s+/(?!\\w)"
+      reason: "Deleting root filesystem"
+    - pattern: "rm\\s+-rf\\s+~"
+      reason: "Deleting home directory"
+    - pattern: "rm\\s+-rf\\s+\\*"
+      reason: "Deleting all files recursively"
+    - pattern: "chmod\\s+777\\s+/"
+      reason: "Setting world-writable permissions on root"
+    - pattern: "mkfs\\."
+      reason: "Formatting filesystem"
+    - pattern: "dd\\s+.*of=/dev/"
+      reason: "Writing directly to device"
+
+  # Database destructive commands
+  database_destructive:
+    - pattern: "DROP\\s+DATABASE"
+      reason: "Dropping database"
+    - pattern: "DROP\\s+SCHEMA"
+      reason: "Dropping schema"
+    - pattern: "TRUNCATE\\s+TABLE"
+      reason: "Truncating table loses all data"
+    - pattern: "DELETE\\s+FROM\\s+\\w+\\s*;"
+      reason: "DELETE without WHERE clause"
+
+  # GCP destructive commands
+  gcp_destructive:
+    - pattern: "gcloud\\s+projects\\s+delete"
+      reason: "Deleting GCP project"
+    - pattern: "gcloud\\s+iam\\s+.*remove-iam-policy-binding"
+      reason: "Removing IAM bindings"
+    - pattern: "gcloud\\s+compute\\s+instances\\s+delete"
+      reason: "Deleting compute instances"
+    - pattern: "gcloud\\s+sql\\s+instances\\s+delete"
+      reason: "Deleting SQL instances"
+    - pattern: "gcloud\\s+storage\\s+.*rm\\s+-r"
+      reason: "Recursively deleting storage"
+
+  # AWS destructive commands
+  aws_destructive:
+    - pattern: "aws\\s+s3\\s+rb\\s+.*--force"
+      reason: "Force deleting S3 bucket"
+    - pattern: "aws\\s+ec2\\s+terminate-instances"
+      reason: "Terminating EC2 instances"
+    - pattern: "aws\\s+rds\\s+delete-db-instance"
+      reason: "Deleting RDS instance"
+
+  # Safety bypass prevention - prevent disabling protections
+  safety_bypass:
+    - pattern: "\\.claude/settings\\.json"
+      reason: "Modifying Claude settings/hooks"
+    - pattern: "\\.claude/settings\\.local\\.json"
+      reason: "Modifying Claude local settings"
+    - pattern: "\\.git/hooks/pre-commit"
+      reason: "Modifying git pre-commit hook"
+    - pattern: "\\.git/hooks/pre-push"
+      reason: "Modifying git pre-push hook"
+    - pattern: "\\.git/hooks/commit-msg"
+      reason: "Modifying git commit-msg hook"
+    - pattern: "hooks/safety\\.py"
+      reason: "Modifying safety hook"
+    - pattern: "hooks/safety_config\\.yaml"
+      reason: "Modifying safety config"
+
+
+# Commands that will be ESCALATED (ask user for permission)
+# Use for commands that might be intentional but need human review
+escalate:
+
+  # Pushing to protected branches - might be intentional
+  git_push_protected:
+    - pattern: "git\\s+push\\s+.*\\b(main|master)\\b"
+      reason: "Pushing to protected branch"
+
+  # All Pulumi commands - infrastructure changes need review
+  pulumi:
+    - pattern: "^pulumi\\s+"
+      reason: "Pulumi infrastructure command"
+    - pattern: "\\bpulumi\\s+(up|destroy|preview)"
+      reason: "Pulumi state-changing command"
+
+  # Terraform commands
+  terraform:
+    - pattern: "^terraform\\s+(apply|destroy)"
+      reason: "Terraform state-changing command"
+    - pattern: "terraform\\s+import"
+      reason: "Terraform import command"
+
+  # Database migrations
+  database_migrations:
+    - pattern: "(alembic|flask\\s+db)\\s+(upgrade|downgrade)"
+      reason: "Database migration"
+    - pattern: "prisma\\s+(migrate|db\\s+push)"
+      reason: "Prisma migration"
+    - pattern: "django.*migrate"
+      reason: "Django migration"
+
+  # Kubernetes operations
+  kubernetes:
+    - pattern: "kubectl\\s+delete"
+      reason: "Kubernetes delete command"
+    - pattern: "kubectl\\s+apply.*--force"
+      reason: "Kubernetes force apply"
+    - pattern: "helm\\s+(install|upgrade|delete)"
+      reason: "Helm chart operation"
+
+  # Docker cleanup
+  docker:
+    - pattern: "docker\\s+system\\s+prune"
+      reason: "Docker system prune"
+    - pattern: "docker\\s+volume\\s+prune"
+      reason: "Docker volume prune"
+
+  # Package management with global scope
+  packages:
+    - pattern: "npm\\s+.*-g"
+      reason: "Global npm install"
+    - pattern: "pip\\s+install\\s+--user"
+      reason: "User-level pip install"
+
+  # GCP commands with quiet flag
+  gcp_quiet:
+    - pattern: "gcloud\\s+.*--quiet"
+      reason: "GCP command with --quiet flag"
