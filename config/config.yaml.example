@@ -29,8 +29,17 @@ credentials:
   # Run ./setup/credentials-setup.sh to configure these
   # If set, these are used instead of personal credentials above
   #
+  # Option 1: Bot Account (single GitHub user with SSH key)
   # claude_git: ~/.config/remote-claude/credentials/git/.gitconfig
   # claude_ssh: ~/.config/remote-claude/credentials/git/.ssh
+  #
+  # Option 2: Deploy Keys (per-repository SSH keys, works with GitHub EMU)
+  # Recommended for Enterprise Managed Users environments
+  # deploy_keys_git: ~/.config/remote-claude/credentials/deploy-keys/.gitconfig
+  # deploy_keys_ssh: ~/.config/remote-claude/credentials/deploy-keys/.ssh
+  # deploy_keys_registry: ~/.config/remote-claude/credentials/deploy-keys/registry.json
+  #
+  # GCP service account (works with either GitHub auth method)
   # claude_gcp: ~/.config/remote-claude/credentials/gcp/claude-sa-key.json
 
 notifications:

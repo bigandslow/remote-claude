@@ -82,6 +82,80 @@ def load_config() -> dict:
     return {}
 
 
+# Private IP ranges (SSRF protection)
+_PRIVATE_IP_PREFIXES = (
+    "10.",
+    "172.16.", "172.17.", "172.18.", "172.19.",
+    "172.20.", "172.21.", "172.22.", "172.23.",
+    "172.24.", "172.25.", "172.26.", "172.27.",
+    "172.28.", "172.29.", "172.30.", "172.31.",
+    "192.168.",
+    "127.",
+    "169.254.",  # Link-local
+    "0.",
+)
+
+_PRIVATE_HOSTNAMES = (
+    "localhost",
+    "localhost.localdomain",
+    "local",
+    "internal",
+    "intranet",
+)
+
+
+def validate_webhook_url(url: str) -> tuple[bool, str]:
+    """Validate a webhook URL for security.
+
+    Checks:
+    - Must be http or https (https preferred)
+    - Must not point to private IP ranges
+    - Must not point to localhost or internal hostnames
+
+    Returns:
+        Tuple of (is_valid, error_message). error_message is empty if valid.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return (False, "Invalid URL format")
+
+    # Check scheme
+    if parsed.scheme not in ("http", "https"):
+        return (False, f"Invalid URL scheme: {parsed.scheme}. Only http/https allowed.")
+
+    if parsed.scheme == "http":
+        print(f"Warning: Using insecure HTTP for webhook: {url}", file=sys.stderr)
+
+    # Check hostname
+    hostname = parsed.hostname
+    if not hostname:
+        return (False, "URL missing hostname")
+
+    hostname_lower = hostname.lower()
+
+    # Block known internal hostnames
+    for private_host in _PRIVATE_HOSTNAMES:
+        if hostname_lower == private_host or hostname_lower.endswith(f".{private_host}"):
+            return (False, f"Webhook URL points to internal hostname: {hostname}")
+
+    # Check if hostname looks like an IP address and if so, check if private
+    import socket
+    try:
+        # Try to resolve the hostname to check for private IPs
+        addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        for info in addr_info:
+            ip = info[4][0]
+            for prefix in _PRIVATE_IP_PREFIXES:
+                if ip.startswith(prefix):
+                    return (False, f"Webhook URL resolves to private IP: {ip}")
+    except socket.gaierror:
+        # Can't resolve - might be fine, let the request fail later
+        pass
+
+    return (True, "")
+
+
 def send_webhook(
     url: str,
     title: str,
@@ -98,7 +172,15 @@ def send_webhook(
     - Discord-compatible
     - Pushover-compatible
     - ntfy.sh compatible
+
+    Security: URLs are validated to prevent SSRF attacks.
     """
+    # Validate URL to prevent SSRF
+    is_valid, error = validate_webhook_url(url)
+    if not is_valid:
+        print(f"Webhook URL validation failed: {error}", file=sys.stderr)
+        return False
+
     timestamp = datetime.now().isoformat()
     hostname = os.uname().nodename
 

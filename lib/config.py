@@ -48,6 +48,11 @@ class CredentialsConfig:
     claude_ssh: Optional[Path] = None      # SSH keys for bot account
     claude_gcp: Optional[Path] = None      # GCP service account key
 
+    # Deploy key credentials (takes precedence over bot account if configured)
+    deploy_keys_git: Optional[Path] = None       # Git config for deploy keys
+    deploy_keys_ssh: Optional[Path] = None       # SSH directory with deploy keys
+    deploy_keys_registry: Optional[Path] = None  # JSON registry of repo -> alias mappings
+
 
 @dataclass
 class NotificationsConfig:
@@ -126,6 +131,13 @@ def load_config() -> Config:
             config.credentials.claude_ssh = Path(cred_data["claude_ssh"]).expanduser()
         if "claude_gcp" in cred_data:
             config.credentials.claude_gcp = Path(cred_data["claude_gcp"]).expanduser()
+        # Deploy key credentials (optional, takes precedence)
+        if "deploy_keys_git" in cred_data:
+            config.credentials.deploy_keys_git = Path(cred_data["deploy_keys_git"]).expanduser()
+        if "deploy_keys_ssh" in cred_data:
+            config.credentials.deploy_keys_ssh = Path(cred_data["deploy_keys_ssh"]).expanduser()
+        if "deploy_keys_registry" in cred_data:
+            config.credentials.deploy_keys_registry = Path(cred_data["deploy_keys_registry"]).expanduser()
 
     # Notifications config
     if "notifications" in data:
@@ -169,6 +181,9 @@ def save_config(config: Config) -> None:
             **({"claude_git": str(config.credentials.claude_git)} if config.credentials.claude_git else {}),
             **({"claude_ssh": str(config.credentials.claude_ssh)} if config.credentials.claude_ssh else {}),
             **({"claude_gcp": str(config.credentials.claude_gcp)} if config.credentials.claude_gcp else {}),
+            **({"deploy_keys_git": str(config.credentials.deploy_keys_git)} if config.credentials.deploy_keys_git else {}),
+            **({"deploy_keys_ssh": str(config.credentials.deploy_keys_ssh)} if config.credentials.deploy_keys_ssh else {}),
+            **({"deploy_keys_registry": str(config.credentials.deploy_keys_registry)} if config.credentials.deploy_keys_registry else {}),
         },
         "notifications": {
             "webhook_url": config.notifications.webhook_url,

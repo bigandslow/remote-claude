@@ -7,6 +7,57 @@ set -e
 # Ensure we're in the workspace
 cd /workspace
 
+# Set up git URL rewriting for deploy keys
+setup_deploy_keys() {
+    local registry_file="/home/claude/.deploy-keys-registry.json"
+
+    if [ ! -f "$registry_file" ]; then
+        return 0
+    fi
+
+    echo "Configuring git for deploy keys..."
+
+    # Parse registry and set up git insteadOf rules for each repo
+    python3 << 'EOF'
+import json
+import subprocess
+from pathlib import Path
+
+registry_file = Path("/home/claude/.deploy-keys-registry.json")
+if not registry_file.exists():
+    exit(0)
+
+registry = json.loads(registry_file.read_text())
+
+for repo, info in registry.get("repos", {}).items():
+    alias = info["alias"]
+    org, repo_name = repo.split("/", 1)
+
+    # Set up URL rewriting so standard github.com URLs use the deploy key alias
+    # git@github.com:org/repo.git -> git@github-alias:org/repo.git
+    # https://github.com/org/repo.git -> git@github-alias:org/repo.git
+    insteadof_ssh = f"git@github.com:{repo}.git"
+    insteadof_https = f"https://github.com/{repo}.git"
+    insteadof_https_no_ext = f"https://github.com/{repo}"
+    new_url = f"git@github-{alias}:{repo}.git"
+
+    subprocess.run([
+        "git", "config", "--global",
+        f"url.{new_url}.insteadOf", insteadof_ssh
+    ], check=True)
+    subprocess.run([
+        "git", "config", "--global",
+        f"url.{new_url}.insteadOf", insteadof_https
+    ], check=True)
+    subprocess.run([
+        "git", "config", "--global",
+        f"url.{new_url}.insteadOf", insteadof_https_no_ext
+    ], check=True)
+
+    print(f"  Configured: {repo} -> github-{alias}")
+EOF
+}
+
 # Set up Claude settings with safety hook
 setup_safety_hook() {
     local claude_dir="/home/claude/.claude"
@@ -44,6 +95,11 @@ setup_safety_hook() {
         fi
     fi
 }
+
+# Configure deploy keys if enabled
+if [ -n "$RC_USE_DEPLOY_KEYS" ]; then
+    setup_deploy_keys
+fi
 
 # Configure safety protections
 setup_safety_hook

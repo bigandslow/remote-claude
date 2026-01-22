@@ -1,0 +1,6 @@
+name: remote-claude-wif
+runtime:
+  name: python
+  options:
+    virtualenv: venv
+description: Workload Identity Federation setup for Remote Claude

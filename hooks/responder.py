@@ -55,6 +55,48 @@ USED_TOKENS: set = set()
 USED_TOKENS_CLEANUP_INTERVAL = 600  # Clean up old tokens every 10 min
 LAST_CLEANUP = time.time()
 
+# Rate limiting
+RATE_LIMIT_REQUESTS = 10  # Max requests per window
+RATE_LIMIT_WINDOW = 60  # Window in seconds
+_rate_limit_tracker: dict[str, list[float]] = {}  # IP -> list of timestamps
+_rate_limit_last_cleanup = time.time()
+
+
+def check_rate_limit(client_ip: str) -> bool:
+    """Check if client IP is within rate limit.
+
+    Returns True if request should be allowed, False if rate limited.
+    """
+    global _rate_limit_last_cleanup
+
+    now = time.time()
+
+    # Periodic cleanup of old entries (every 5 minutes)
+    if now - _rate_limit_last_cleanup > 300:
+        cutoff = now - RATE_LIMIT_WINDOW * 2
+        for ip in list(_rate_limit_tracker.keys()):
+            _rate_limit_tracker[ip] = [t for t in _rate_limit_tracker[ip] if t > cutoff]
+            if not _rate_limit_tracker[ip]:
+                del _rate_limit_tracker[ip]
+        _rate_limit_last_cleanup = now
+
+    # Get request history for this IP
+    if client_ip not in _rate_limit_tracker:
+        _rate_limit_tracker[client_ip] = []
+
+    # Filter to requests within the current window
+    window_start = now - RATE_LIMIT_WINDOW
+    recent_requests = [t for t in _rate_limit_tracker[client_ip] if t > window_start]
+    _rate_limit_tracker[client_ip] = recent_requests
+
+    # Check if over limit
+    if len(recent_requests) >= RATE_LIMIT_REQUESTS:
+        return False
+
+    # Record this request
+    _rate_limit_tracker[client_ip].append(now)
+    return True
+
 
 def get_secret_key() -> bytes:
     """Get or generate the secret key for signing tokens."""
@@ -235,9 +277,20 @@ class ResponderHandler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         params = urllib.parse.parse_qs(parsed.query)
 
-        # Health check endpoint
+        # Health check endpoint (exempt from rate limiting)
         if parsed.path == "/health":
             self.send_json_response(200, {"status": "ok"})
+            return
+
+        # Rate limit check for all other endpoints
+        client_ip = self.client_address[0]
+        if not check_rate_limit(client_ip):
+            self.log_message(f"Rate limited: {client_ip}")
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Retry-After", str(RATE_LIMIT_WINDOW))
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "Too many requests"}).encode())
             return
 
         # Respond endpoint
@@ -389,6 +442,11 @@ Examples:
         choices=list(ACTION_KEYS.keys()),
         help="Action (for --gen-token)",
     )
+    parser.add_argument(
+        "--allow-localhost",
+        action="store_true",
+        help="Allow binding to localhost when Tailscale unavailable (less secure)",
+    )
 
     args = parser.parse_args()
 
@@ -431,9 +489,23 @@ Examples:
                 time.sleep(2)
 
         if not host:
+            if not args.allow_localhost:
+                print("ERROR: Tailscale not found and --allow-localhost not specified.", file=sys.stderr)
+                print("", file=sys.stderr)
+                print("Security Warning:", file=sys.stderr)
+                print("  Binding to localhost is less secure than Tailscale.", file=sys.stderr)
+                print("  Other processes on this machine could access the responder.", file=sys.stderr)
+                print("", file=sys.stderr)
+                print("Options:", file=sys.stderr)
+                print("  1. Install and connect Tailscale for secure remote access", file=sys.stderr)
+                print("  2. Use --allow-localhost to accept the security risk", file=sys.stderr)
+                print("  3. Use --host to specify a specific interface", file=sys.stderr)
+                sys.exit(1)
+
             host = "127.0.0.1"
-            print(f"Tailscale not found, using localhost: {host}", flush=True)
-            print("(Install Tailscale for secure remote access)", flush=True)
+            print("WARNING: Tailscale not found, falling back to localhost.", flush=True)
+            print("WARNING: This is less secure - other processes on this machine can access the responder.", flush=True)
+            print(f"Binding to: {host}", flush=True)
 
     # Run server
     if args.daemon:

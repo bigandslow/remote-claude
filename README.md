@@ -468,13 +468,49 @@ rc start ~/cproj-workspaces/myproject_feature/feature-y_*
 
 ## Security Considerations
 
+### Container Isolation
+
 - Containers run as non-root user `claude`
-- Credentials are mounted read-only
-- Network can be restricted to allowlisted domains
+- Limited sudo access: only package managers (apt-get, npm, pip) allowed
 - Each session is isolated in its own container
 - Workspace changes stay in the worktree for PR review
+
+### Credential Protection
+
+- All credentials mounted read-only
+- GCP uses Workload Identity Federation (no long-lived keys)
+- WIF tokens are short-lived and cleaned up after use
+- Prefer environment variables for notification credentials
+
+### Network Security
+
+- **None mode**: Complete network isolation (`--network none`)
+- **Allowlist mode**: Proxy-based filtering for specific domains only
+- Default allowed: GitHub, PyPI, npm, googleapis.com
+- Tailscale binding preferred for responder (not localhost)
+
+### Safety Hook
+
+The safety hook (`hooks/safety.py`) blocks dangerous commands:
+- `git push --force`, `git reset --hard`
+- Database destructive operations (DROP, TRUNCATE)
+- GCP resource deletion
+- Recursive file deletion in system paths
+
+Audit logs stored in `~/.config/remote-claude/audit/` with JSON format.
+
+### Remote Access
+
 - SSH key-based authentication recommended (disable password auth)
 - Tailscale provides encrypted connections without port forwarding
+- Responder requires `--allow-localhost` flag when Tailscale unavailable
+- Rate limiting (10 requests/minute) on responder endpoint
+
+### Webhook Security
+
+- URLs validated to prevent SSRF attacks
+- Private IP ranges blocked
+- HTTPS preferred (warning on HTTP)
 
 ## Troubleshooting
 

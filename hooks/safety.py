@@ -148,16 +148,80 @@ def check_command(command: str, patterns: dict) -> Optional[Tuple[str, str]]:
     return None
 
 
-def log_decision(command: str, decision: str, reason: str):
-    """Log blocked/escalated commands for audit."""
-    log_dir = Path("/tmp/rc-safety-logs")
-    log_dir.mkdir(exist_ok=True)
+def _get_audit_log_dir() -> Path:
+    """Get the audit log directory, creating it with secure permissions if needed."""
+    config_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    log_dir = config_dir / "remote-claude" / "audit"
 
-    log_file = log_dir / f"{datetime.now().strftime('%Y-%m-%d')}.log"
-    timestamp = datetime.now().isoformat()
+    if not log_dir.exists():
+        log_dir.mkdir(parents=True, exist_ok=True)
+        # Set directory permissions to owner-only
+        os.chmod(log_dir, 0o700)
 
+    return log_dir
+
+
+def _rotate_logs(log_file: Path, max_size: int = 10 * 1024 * 1024, max_files: int = 5) -> None:
+    """Rotate log file if it exceeds max_size. Keeps max_files backups."""
+    if not log_file.exists():
+        return
+
+    if log_file.stat().st_size < max_size:
+        return
+
+    # Rotate existing backups
+    for i in range(max_files - 1, 0, -1):
+        old_backup = log_file.with_suffix(f".log.{i}")
+        new_backup = log_file.with_suffix(f".log.{i + 1}")
+        if old_backup.exists():
+            if i + 1 >= max_files:
+                old_backup.unlink()
+            else:
+                old_backup.rename(new_backup)
+
+    # Rotate current log to .1
+    backup = log_file.with_suffix(".log.1")
+    log_file.rename(backup)
+
+
+def log_decision(command: str, decision: str, reason: str, session_id: Optional[str] = None):
+    """Log blocked/escalated commands for audit.
+
+    Logs are written to ~/.config/remote-claude/audit/ in JSON format
+    with secure file permissions (0600). Log rotation is applied at 10MB.
+
+    Args:
+        command: The command that was checked
+        decision: The decision made (block, escalate, allow)
+        reason: Human-readable reason for the decision
+        session_id: Optional session identifier from environment
+    """
+    log_dir = _get_audit_log_dir()
+    log_file = log_dir / "safety.log"
+
+    # Check for rotation before writing
+    _rotate_logs(log_file)
+
+    # Get session ID from environment if not provided
+    if session_id is None:
+        session_id = os.environ.get("RC_SESSION_ID", "unknown")
+
+    # Create structured log entry
+    entry = {
+        "ts": datetime.now().isoformat(),
+        "session": session_id,
+        "decision": decision.lower(),
+        "reason": reason,
+        "command": command[:500],  # Truncate very long commands
+    }
+
+    # Write with secure permissions
+    is_new_file = not log_file.exists()
     with open(log_file, "a") as f:
-        f.write(f"{timestamp} | {decision.upper()} | {reason} | {command[:100]}\n")
+        f.write(json.dumps(entry) + "\n")
+
+    if is_new_file:
+        os.chmod(log_file, 0o600)
 
 
 def main():

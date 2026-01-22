@@ -3,13 +3,15 @@
 # Remote Claude - Dedicated Credentials Setup
 #
 # Sets up dedicated git and GCP credentials for Claude YOLO sessions.
-# Supports both GitHub.com and GitHub Enterprise.
+# Supports GitHub.com, GitHub Enterprise, and per-repository deploy keys.
 #
 # Usage:
-#   ./setup/credentials-setup.sh              # Interactive setup
-#   ./setup/credentials-setup.sh --git-only   # Only setup git credentials
-#   ./setup/credentials-setup.sh --gcp-only   # Only setup GCP credentials
-#   ./setup/credentials-setup.sh --status     # Show current configuration
+#   ./setup/credentials-setup.sh                  # Interactive setup
+#   ./setup/credentials-setup.sh --git-only       # Only setup git credentials (bot account)
+#   ./setup/credentials-setup.sh --deploy-keys    # Setup per-repository deploy keys
+#   ./setup/credentials-setup.sh --add-repo       # Add a deploy key for a new repo
+#   ./setup/credentials-setup.sh --gcp-only       # Only setup GCP credentials
+#   ./setup/credentials-setup.sh --status         # Show current configuration
 
 set -e
 
@@ -17,6 +19,8 @@ set -e
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/remote-claude"
 CREDS_DIR="$CONFIG_DIR/credentials"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
+DEPLOY_KEYS_DIR="$CREDS_DIR/deploy-keys"
+DEPLOY_KEYS_REGISTRY="$DEPLOY_KEYS_DIR/registry.json"
 
 # Colors
 RED='\033[0;31m'
@@ -34,7 +38,14 @@ header() { echo -e "\n${BLUE}=== $1 ===${NC}\n"; }
 init_directories() {
     mkdir -p "$CREDS_DIR/git/.ssh"
     mkdir -p "$CREDS_DIR/gcp"
+    mkdir -p "$DEPLOY_KEYS_DIR/.ssh"
     chmod 700 "$CREDS_DIR/git/.ssh"
+    chmod 700 "$DEPLOY_KEYS_DIR/.ssh"
+
+    # Initialize deploy keys registry if it doesn't exist
+    if [[ ! -f "$DEPLOY_KEYS_REGISTRY" ]]; then
+        echo '{"repos": {}}' > "$DEPLOY_KEYS_REGISTRY"
+    fi
 }
 
 # Setup Git credentials
@@ -205,8 +216,191 @@ EOF
 setup_gcp_credentials() {
     header "GCP Credentials Setup"
 
-    echo "This will create a limited service account for Claude sessions."
-    echo "The service account will have restricted permissions (no admin/delete)."
+    echo "Configure GCP authentication for Claude sessions."
+    echo ""
+    echo "Available methods:"
+    echo "  1. Workload Identity Federation (WIF) - recommended for enterprise"
+    echo "     Uses credential configuration file, no service account keys"
+    echo ""
+    echo "  2. Service Account Key - traditional method"
+    echo "     May be blocked by organization policy (iam.disableServiceAccountKeyCreation)"
+    echo ""
+    echo "  3. Skip GCP setup"
+    echo ""
+    read -p "Select [1]: " gcp_method
+    gcp_method=${gcp_method:-1}
+
+    case "$gcp_method" in
+        1)
+            setup_gcp_wif
+            ;;
+        2)
+            setup_gcp_service_account_key
+            ;;
+        *)
+            info "Skipping GCP setup"
+            return 0
+            ;;
+    esac
+}
+
+# Setup GCP with Workload Identity Federation
+setup_gcp_wif() {
+    header "Workload Identity Federation Setup"
+
+    echo "WIF allows authentication without service account keys."
+    echo "The container authenticates via WIF and never has access to your credentials."
+    echo ""
+    echo "Options:"
+    echo "  1. Deploy new WIF infrastructure (using Pulumi)"
+    echo "  2. Use existing WIF credential configuration file"
+    echo "  3. Skip"
+    echo ""
+    read -p "Select [1]: " wif_option
+    wif_option=${wif_option:-1}
+
+    case "$wif_option" in
+        1)
+            setup_gcp_wif_pulumi
+            ;;
+        2)
+            setup_gcp_wif_existing
+            ;;
+        *)
+            info "Skipping WIF setup"
+            return 0
+            ;;
+    esac
+}
+
+# Deploy WIF infrastructure using Pulumi
+setup_gcp_wif_pulumi() {
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    local pulumi_script="$script_dir/infra/setup-wif.sh"
+
+    if [[ ! -f "$pulumi_script" ]]; then
+        error "Pulumi setup script not found: $pulumi_script"
+        return 1
+    fi
+
+    echo ""
+    echo "This will deploy WIF infrastructure using Pulumi:"
+    echo "  - Limited service account (claude-agent)"
+    echo "  - Workload Identity Pool"
+    echo "  - OIDC Provider for gcloud auth"
+    echo "  - IAM bindings for impersonation"
+    echo ""
+
+    read -p "GCP Project ID: " project_id
+    if [[ -z "$project_id" ]]; then
+        error "Project ID is required"
+        return 1
+    fi
+
+    # Get current user's email for allowed_users
+    local current_email=$(gcloud config get-value account 2>/dev/null)
+    echo ""
+    echo "Current gcloud account: $current_email"
+    read -p "Allowed users (comma-separated, Enter for current user only): " allowed_users
+    allowed_users=${allowed_users:-$current_email}
+
+    echo ""
+    info "Running Pulumi setup..."
+    echo ""
+
+    # Run the Pulumi setup script
+    "$pulumi_script" "$project_id" "$allowed_users"
+}
+
+# Use existing WIF credential configuration
+setup_gcp_wif_existing() {
+    echo ""
+    echo "You'll need a credential configuration file."
+    echo "This can be generated with:"
+    echo ""
+    echo "  gcloud iam workload-identity-pools create-cred-config \\"
+    echo "    projects/\$PROJECT_NUMBER/locations/global/workloadIdentityPools/\$POOL_ID/providers/\$PROVIDER_ID \\"
+    echo "    --service-account=\$SERVICE_ACCOUNT_EMAIL \\"
+    echo "    --output-file=credential-config.json \\"
+    echo "    --executable-command=\"gcloud auth print-identity-token --audiences=...\""
+    echo ""
+    echo "Note: The credential config file does NOT contain secrets."
+    echo ""
+
+    read -p "Path to WIF credential configuration file: " wif_config_path
+
+    if [[ -z "$wif_config_path" ]]; then
+        error "Path is required"
+        return 1
+    fi
+
+    if [[ ! -f "$wif_config_path" ]]; then
+        error "File not found: $wif_config_path"
+        return 1
+    fi
+
+    # Validate it's a WIF config (should have type: external_account)
+    if ! grep -q '"type".*:.*"external_account"' "$wif_config_path" 2>/dev/null; then
+        warn "File doesn't appear to be a WIF credential config (missing type: external_account)"
+        read -p "Continue anyway? [y/N]: " continue_anyway
+        if [[ "$continue_anyway" != "y" && "$continue_anyway" != "Y" ]]; then
+            return 1
+        fi
+    fi
+
+    # Copy to credentials directory
+    mkdir -p "$CREDS_DIR/gcp"
+    local dest_file="$CREDS_DIR/gcp/wif-credential-config.json"
+    cp "$wif_config_path" "$dest_file"
+    chmod 600 "$dest_file"
+
+    # Create a symlink with the standard name for consistency
+    ln -sf "wif-credential-config.json" "$CREDS_DIR/gcp/claude-sa-key.json"
+
+    info "WIF credential config copied to: $dest_file"
+    echo ""
+
+    # Show what's in the config (non-sensitive)
+    echo "Configuration summary:"
+    python3 << EOF
+import json
+from pathlib import Path
+
+config = json.loads(Path("$dest_file").read_text())
+print(f"  Type: {config.get('type', 'unknown')}")
+
+audience = config.get('audience', '')
+if 'workloadIdentityPools' in audience:
+    parts = audience.split('/')
+    for i, part in enumerate(parts):
+        if part == 'workloadIdentityPools' and i+1 < len(parts):
+            print(f"  Pool: {parts[i+1]}")
+        if part == 'providers' and i+1 < len(parts):
+            print(f"  Provider: {parts[i+1]}")
+
+cred_source = config.get('credential_source', {})
+if 'file' in cred_source:
+    print(f"  Token source: file ({cred_source['file']})")
+elif 'url' in cred_source:
+    print(f"  Token source: URL")
+elif 'executable' in cred_source:
+    print(f"  Token source: executable")
+
+if config.get('service_account_impersonation_url'):
+    sa = config['service_account_impersonation_url'].split('/')[-1].replace(':generateAccessToken', '')
+    print(f"  Impersonates: {sa}")
+EOF
+
+    echo ""
+    info "GCP WIF authentication configured!"
+}
+
+# Setup GCP with Service Account Key
+setup_gcp_service_account_key() {
+    header "Service Account Key Setup"
+
+    echo "This method uses a service account key JSON file."
+    echo "Note: May be blocked by organization policy (iam.disableServiceAccountKeyCreation)"
     echo ""
 
     # Check if gcloud is available
@@ -215,7 +409,7 @@ setup_gcp_credentials() {
         echo ""
         echo "Options:"
         echo "  1. Provide an existing service account key file"
-        echo "  2. Skip GCP setup"
+        echo "  2. Skip"
         echo ""
         read -p "Select [2]: " gcp_option
         gcp_option=${gcp_option:-2}
@@ -236,10 +430,10 @@ setup_gcp_credentials() {
         fi
     else
         # Use gcloud to create service account
-        echo "Available options:"
-        echo "  1. Create new service account (recommended)"
-        echo "  2. Use existing service account key"
-        echo "  3. Skip GCP setup"
+        echo "Options:"
+        echo "  1. Create new service account"
+        echo "  2. Use existing service account key file"
+        echo "  3. Skip"
         echo ""
         read -p "Select [1]: " gcp_option
         gcp_option=${gcp_option:-1}
@@ -327,6 +521,294 @@ setup_gcp_credentials() {
     fi
 }
 
+# Generate a safe alias for a repo (used as SSH host alias)
+generate_repo_alias() {
+    local repo="$1"
+    # Convert org/repo to org-repo (safe for SSH host alias)
+    echo "$repo" | tr '/' '-' | tr '.' '-' | tr ':' '-'
+}
+
+# Add a single deploy key for a repository
+add_deploy_key() {
+    local repo="$1"
+    local write_access="${2:-true}"
+
+    if [[ -z "$repo" ]]; then
+        read -p "Repository (org/repo format, e.g., myorg/myrepo): " repo
+    fi
+
+    if [[ -z "$repo" ]]; then
+        error "Repository is required"
+        return 1
+    fi
+
+    # Validate format
+    if [[ ! "$repo" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
+        error "Invalid repository format. Use: org/repo"
+        return 1
+    fi
+
+    local alias=$(generate_repo_alias "$repo")
+    local key_file="$DEPLOY_KEYS_DIR/.ssh/deploy_${alias}"
+
+    # Check if key already exists
+    if [[ -f "$key_file" ]]; then
+        warn "Deploy key already exists for $repo"
+        read -p "Regenerate key? [y/N]: " regen
+        if [[ "$regen" != "y" && "$regen" != "Y" ]]; then
+            info "Keeping existing key"
+            return 0
+        fi
+        rm -f "$key_file" "$key_file.pub"
+    fi
+
+    # Generate key
+    info "Generating deploy key for $repo..."
+    ssh-keygen -t ed25519 -f "$key_file" -N "" -C "deploy-key-$repo"
+    chmod 600 "$key_file"
+    chmod 644 "$key_file.pub"
+
+    # Update registry
+    python3 << EOF
+import json
+from pathlib import Path
+
+registry_file = Path("$DEPLOY_KEYS_REGISTRY")
+registry = json.loads(registry_file.read_text())
+
+registry["repos"]["$repo"] = {
+    "alias": "$alias",
+    "key_file": "$key_file",
+    "write_access": $([[ "$write_access" == "true" ]] && echo "True" || echo "False")
+}
+
+registry_file.write_text(json.dumps(registry, indent=2))
+EOF
+
+    # Regenerate SSH config
+    regenerate_deploy_ssh_config
+
+    # Display public key
+    echo ""
+    info "Deploy key public key for $repo:"
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    cat "$key_file.pub"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Add this key to: https://github.com/$repo/settings/keys"
+    echo "  - Title: Claude Deploy Key"
+    echo "  - Check 'Allow write access' for push capability"
+    echo ""
+
+    return 0
+}
+
+# Regenerate SSH config from registry
+regenerate_deploy_ssh_config() {
+    local ssh_config="$DEPLOY_KEYS_DIR/.ssh/config"
+
+    cat > "$ssh_config" << 'EOF'
+# SSH config for Remote Claude deploy keys
+# Generated by credentials-setup.sh
+# DO NOT EDIT - regenerated automatically
+
+EOF
+
+    # Add entry for each repo
+    python3 << EOF
+import json
+from pathlib import Path
+
+registry_file = Path("$DEPLOY_KEYS_REGISTRY")
+registry = json.loads(registry_file.read_text())
+ssh_config = Path("$ssh_config")
+
+config_content = ssh_config.read_text()
+
+for repo, info in registry.get("repos", {}).items():
+    alias = info["alias"]
+    key_file = info["key_file"]
+
+    config_content += f"""# {repo}
+Host github-{alias}
+    HostName github.com
+    User git
+    IdentityFile {key_file}
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+
+"""
+
+ssh_config.write_text(config_content)
+EOF
+
+    chmod 600 "$ssh_config"
+    info "SSH config updated: $ssh_config"
+}
+
+# Setup deploy keys (interactive)
+setup_deploy_keys() {
+    header "Deploy Keys Setup"
+
+    echo "Deploy keys provide per-repository SSH access without needing a bot account."
+    echo "Each repository gets its own SSH key that is added directly to the repo settings."
+    echo ""
+    echo "Benefits:"
+    echo "  - No IdP/SCIM user needed (works with GitHub EMU)"
+    echo "  - No license consumed"
+    echo "  - Branch protection rules still apply"
+    echo ""
+    echo "Limitations:"
+    echo "  - One key per repository (cannot reuse)"
+    echo "  - Must add key to each repo manually"
+    echo ""
+
+    # Get commit identity
+    echo "First, set up the git identity for commits:"
+    read -p "Committer name (e.g., Claude Bot): " committer_name
+    read -p "Committer email (e.g., claude-bot@example.com): " committer_email
+
+    if [[ -z "$committer_name" || -z "$committer_email" ]]; then
+        error "Name and email are required"
+        return 1
+    fi
+
+    # Create git config for deploy keys
+    local git_config="$DEPLOY_KEYS_DIR/.gitconfig"
+    cat > "$git_config" << EOF
+[user]
+    name = $committer_name
+    email = $committer_email
+
+[push]
+    default = simple
+    autoSetupRemote = true
+
+[pull]
+    rebase = false
+
+[init]
+    defaultBranch = main
+
+# Safety: prevent force push
+[receive]
+    denyNonFastForwards = true
+EOF
+
+    info "Git config created: $git_config"
+    echo ""
+
+    # Add repos
+    echo "Now add deploy keys for your repositories."
+    echo "You can add more later with: $0 --add-repo"
+    echo ""
+
+    while true; do
+        read -p "Add a repository? [Y/n]: " add_repo
+        if [[ "$add_repo" == "n" || "$add_repo" == "N" ]]; then
+            break
+        fi
+
+        add_deploy_key
+        echo ""
+    done
+
+    # Show branch protection reminder
+    echo ""
+    header "Branch Protection Setup"
+    echo "To prevent Claude from pushing directly to main/master:"
+    echo ""
+    echo "1. Go to Repository → Settings → Branches → Add rule"
+    echo "2. Branch name pattern: main (or master)"
+    echo "3. Enable:"
+    echo "   ✓ Require a pull request before merging"
+    echo "   ✓ Do not allow bypassing the above settings"
+    echo "4. Do NOT add the deploy key to any bypass list"
+    echo ""
+    echo "This ensures Claude can only push to feature branches."
+    echo ""
+
+    read -p "Press Enter to continue..."
+
+    info "Deploy keys setup complete!"
+}
+
+# List configured deploy keys
+list_deploy_keys() {
+    header "Configured Deploy Keys"
+
+    if [[ ! -f "$DEPLOY_KEYS_REGISTRY" ]]; then
+        echo "No deploy keys configured."
+        return
+    fi
+
+    python3 << EOF
+import json
+from pathlib import Path
+
+registry_file = Path("$DEPLOY_KEYS_REGISTRY")
+registry = json.loads(registry_file.read_text())
+
+repos = registry.get("repos", {})
+if not repos:
+    print("No deploy keys configured.")
+else:
+    for repo, info in repos.items():
+        write = "write" if info.get("write_access", False) else "read-only"
+        key_exists = "✓" if Path(info["key_file"]).exists() else "✗"
+        print(f"  {key_exists} {repo}")
+        print(f"      Alias: github-{info['alias']}")
+        print(f"      Key: {info['key_file']}")
+        print()
+EOF
+}
+
+# Remove a deploy key
+remove_deploy_key() {
+    local repo="$1"
+
+    if [[ -z "$repo" ]]; then
+        list_deploy_keys
+        echo ""
+        read -p "Repository to remove (org/repo): " repo
+    fi
+
+    if [[ -z "$repo" ]]; then
+        error "Repository is required"
+        return 1
+    fi
+
+    python3 << EOF
+import json
+from pathlib import Path
+
+registry_file = Path("$DEPLOY_KEYS_REGISTRY")
+registry = json.loads(registry_file.read_text())
+
+if "$repo" not in registry.get("repos", {}):
+    print(f"Repository $repo not found in registry")
+    exit(1)
+
+info = registry["repos"]["$repo"]
+key_file = Path(info["key_file"])
+
+# Remove key files
+if key_file.exists():
+    key_file.unlink()
+if key_file.with_suffix(".pub").exists():
+    key_file.with_suffix(".pub").unlink()
+
+# Remove from registry
+del registry["repos"]["$repo"]
+registry_file.write_text(json.dumps(registry, indent=2))
+
+print(f"Removed deploy key for $repo")
+EOF
+
+    regenerate_deploy_ssh_config
+}
+
 # Update config.yaml with credential paths
 update_config() {
     header "Updating Configuration"
@@ -350,6 +832,8 @@ EOF
     local git_config="$CREDS_DIR/git/.gitconfig"
     local ssh_dir="$CREDS_DIR/git/.ssh"
     local gcp_key="$CREDS_DIR/gcp/claude-sa-key.json"
+    local deploy_keys_git="$DEPLOY_KEYS_DIR/.gitconfig"
+    local deploy_keys_ssh="$DEPLOY_KEYS_DIR/.ssh"
 
     # Use Python to update YAML (safer than sed)
     python3 << EOF
@@ -363,6 +847,7 @@ if "credentials" not in config:
     config["credentials"] = {}
 
 # Update credential paths if they exist
+# Bot account credentials
 if Path("$git_config").exists():
     config["credentials"]["claude_git"] = "$git_config"
     print("  Added claude_git: $git_config")
@@ -371,6 +856,22 @@ if Path("$ssh_dir").exists():
     config["credentials"]["claude_ssh"] = "$ssh_dir"
     print("  Added claude_ssh: $ssh_dir")
 
+# Deploy key credentials (takes precedence if configured)
+if Path("$deploy_keys_git").exists():
+    config["credentials"]["deploy_keys_git"] = "$deploy_keys_git"
+    print("  Added deploy_keys_git: $deploy_keys_git")
+
+if Path("$deploy_keys_ssh").exists() and Path("$DEPLOY_KEYS_REGISTRY").exists():
+    # Only add if there are actually repos configured
+    import json
+    registry = json.loads(Path("$DEPLOY_KEYS_REGISTRY").read_text())
+    if registry.get("repos"):
+        config["credentials"]["deploy_keys_ssh"] = "$deploy_keys_ssh"
+        config["credentials"]["deploy_keys_registry"] = "$DEPLOY_KEYS_REGISTRY"
+        print("  Added deploy_keys_ssh: $deploy_keys_ssh")
+        print("  Added deploy_keys_registry: $DEPLOY_KEYS_REGISTRY")
+
+# GCP credentials
 if Path("$gcp_key").exists():
     config["credentials"]["claude_gcp"] = "$gcp_key"
     print("  Added claude_gcp: $gcp_key")
@@ -389,21 +890,47 @@ show_status() {
     echo "Credentials Directory: $CREDS_DIR"
     echo ""
 
-    # Git credentials
-    echo "Git Credentials:"
+    # Git credentials (bot account)
+    echo "Bot Account Credentials:"
     if [[ -f "$CREDS_DIR/git/.gitconfig" ]]; then
-        echo "  Config: $CREDS_DIR/git/.gitconfig"
+        echo "  Git Config: $CREDS_DIR/git/.gitconfig"
         local bot_name=$(grep "name = " "$CREDS_DIR/git/.gitconfig" | head -1 | sed 's/.*name = //')
         local bot_email=$(grep "email = " "$CREDS_DIR/git/.gitconfig" | head -1 | sed 's/.*email = //')
         echo "    User: $bot_name <$bot_email>"
     else
-        echo "  Config: NOT CONFIGURED"
+        echo "  Git Config: NOT CONFIGURED"
     fi
 
     if [[ -f "$CREDS_DIR/git/.ssh/id_ed25519" ]]; then
         echo "  SSH Key: $CREDS_DIR/git/.ssh/id_ed25519"
     else
         echo "  SSH Key: NOT CONFIGURED"
+    fi
+    echo ""
+
+    # Deploy keys
+    echo "Deploy Keys:"
+    if [[ -f "$DEPLOY_KEYS_REGISTRY" ]]; then
+        local repo_count=$(python3 -c "import json; print(len(json.load(open('$DEPLOY_KEYS_REGISTRY')).get('repos', {})))" 2>/dev/null || echo "0")
+        if [[ "$repo_count" -gt 0 ]]; then
+            echo "  Status: CONFIGURED ($repo_count repositories)"
+            if [[ -f "$DEPLOY_KEYS_DIR/.gitconfig" ]]; then
+                local dk_name=$(grep "name = " "$DEPLOY_KEYS_DIR/.gitconfig" | head -1 | sed 's/.*name = //')
+                local dk_email=$(grep "email = " "$DEPLOY_KEYS_DIR/.gitconfig" | head -1 | sed 's/.*email = //')
+                echo "  Committer: $dk_name <$dk_email>"
+            fi
+            echo "  Repositories:"
+            python3 -c "
+import json
+registry = json.load(open('$DEPLOY_KEYS_REGISTRY'))
+for repo in registry.get('repos', {}):
+    print(f'    - {repo}')
+" 2>/dev/null || true
+        else
+            echo "  Status: NOT CONFIGURED"
+        fi
+    else
+        echo "  Status: NOT CONFIGURED"
     fi
     echo ""
 
@@ -422,10 +949,15 @@ show_status() {
     echo "Config File: $CONFIG_FILE"
     if [[ -f "$CONFIG_FILE" ]]; then
         echo "  Status: EXISTS"
-        if grep -q "claude_git\|claude_ssh\|claude_gcp" "$CONFIG_FILE" 2>/dev/null; then
-            echo "  Dedicated credentials: ENABLED"
-        else
-            echo "  Dedicated credentials: NOT CONFIGURED"
+        local cred_type="NONE"
+        if grep -q "deploy_keys_ssh" "$CONFIG_FILE" 2>/dev/null; then
+            cred_type="DEPLOY KEYS"
+        elif grep -q "claude_git\|claude_ssh" "$CONFIG_FILE" 2>/dev/null; then
+            cred_type="BOT ACCOUNT"
+        fi
+        echo "  Git auth mode: $cred_type"
+        if grep -q "claude_gcp" "$CONFIG_FILE" 2>/dev/null; then
+            echo "  GCP auth: ENABLED"
         fi
     else
         echo "  Status: NOT FOUND"
@@ -443,6 +975,24 @@ main() {
             setup_git_credentials
             update_config
             ;;
+        --deploy-keys)
+            init_directories
+            setup_deploy_keys
+            update_config
+            ;;
+        --add-repo)
+            init_directories
+            add_deploy_key "$2"
+            update_config
+            ;;
+        --remove-repo)
+            init_directories
+            remove_deploy_key "$2"
+            update_config
+            ;;
+        --list-repos)
+            list_deploy_keys
+            ;;
         --gcp-only)
             init_directories
             setup_gcp_credentials
@@ -455,12 +1005,24 @@ main() {
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --git-only   Only setup git credentials"
-            echo "  --gcp-only   Only setup GCP credentials"
-            echo "  --status     Show current configuration"
-            echo "  --help       Show this help message"
+            echo "  --git-only       Setup git credentials (bot account method)"
+            echo "  --deploy-keys    Setup per-repository deploy keys (EMU-compatible)"
+            echo "  --add-repo       Add a deploy key for a new repository"
+            echo "  --remove-repo    Remove a deploy key"
+            echo "  --list-repos     List configured deploy key repositories"
+            echo "  --gcp-only       Only setup GCP credentials"
+            echo "  --status         Show current configuration"
+            echo "  --help           Show this help message"
             echo ""
-            echo "Without options, runs interactive setup for both git and GCP."
+            echo "Without options, runs interactive setup wizard."
+            echo ""
+            echo "GitHub Authentication Methods:"
+            echo "  Bot Account:  Single SSH key for a dedicated GitHub user"
+            echo "                Requires creating a new GitHub account"
+            echo ""
+            echo "  Deploy Keys:  Per-repository SSH keys added to repo settings"
+            echo "                Works with GitHub EMU (no IdP user needed)"
+            echo "                Branch protection rules still apply"
             ;;
         *)
             init_directories
@@ -470,13 +1032,37 @@ main() {
             echo "Claude will use these instead of your personal credentials."
             echo ""
 
-            read -p "Setup git credentials (for GitHub)? [Y/n]: " do_git
-            if [[ "$do_git" != "n" && "$do_git" != "N" ]]; then
-                setup_git_credentials
-            fi
+            # Choose GitHub auth method
+            echo "GitHub Authentication Method:"
+            echo "  1. Deploy Keys (recommended for EMU)"
+            echo "     - Per-repository SSH keys"
+            echo "     - No GitHub user account needed"
+            echo "     - Works with Enterprise Managed Users"
+            echo ""
+            echo "  2. Bot Account"
+            echo "     - Single SSH key for dedicated GitHub user"
+            echo "     - Requires creating a new GitHub account"
+            echo ""
+            echo "  3. Skip GitHub setup"
+            echo ""
+            read -p "Select [1]: " git_method
+            git_method=${git_method:-1}
 
-            read -p "Setup GCP credentials? [Y/n]: " do_gcp
-            if [[ "$do_gcp" != "n" && "$do_gcp" != "N" ]]; then
+            case "$git_method" in
+                1)
+                    setup_deploy_keys
+                    ;;
+                2)
+                    setup_git_credentials
+                    ;;
+                *)
+                    info "Skipping GitHub setup"
+                    ;;
+            esac
+
+            echo ""
+            read -p "Setup GCP credentials? [y/N]: " do_gcp
+            if [[ "$do_gcp" == "y" || "$do_gcp" == "Y" ]]; then
                 setup_gcp_credentials
             fi
 
@@ -487,6 +1073,8 @@ main() {
             echo "New Claude sessions will use these credentials automatically."
             echo ""
             echo "To verify, run: $0 --status"
+            echo ""
+            echo "To add more repositories later: $0 --add-repo"
             ;;
     esac
 }

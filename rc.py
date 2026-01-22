@@ -7,6 +7,7 @@ Manages sandboxed Claude Code sessions in Docker containers with tmux persistenc
 
 import argparse
 import os
+import secrets
 import sys
 import time
 from datetime import datetime
@@ -30,11 +31,15 @@ class RemoteClaude:
         )
 
     def generate_session_id(self, workspace_path: Path) -> str:
-        """Generate a unique session ID from workspace path."""
-        # Use the last component of the path + timestamp
+        """Generate a unique session ID from workspace path.
+
+        Uses workspace name prefix + cryptographically random suffix
+        for unpredictability while maintaining human readability.
+        """
         name = workspace_path.name
-        timestamp = datetime.now().strftime("%H%M%S")
-        return f"{name[:20]}-{timestamp}"
+        # Use random hex instead of timestamp for unpredictability
+        random_suffix = secrets.token_hex(4)  # 8 hex chars
+        return f"{name[:16]}-{random_suffix}"
 
     def start(
         self,
