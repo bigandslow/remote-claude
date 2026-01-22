@@ -1,0 +1,17 @@
+name: remote-claude
+type: tool
+base_branch: main
+
+features:
+  claude_workspace: false
+  claude_symlink: false
+  review_agents: false
+  nvm_setup: false
+  env_sync_check: false
+
+custom_actions:
+  # Launch remote-claude session for the new worktree
+  # Session name is derived from branch with prefix stripped (e.g., feature/foo -> foo)
+  - type: run_command
+    description: Launch remote-claude session
+    command: bash -c 'rc start {worktree_path} --name "$(echo {branch} | sed "s|^[^/]*/||")" --no-attach'
