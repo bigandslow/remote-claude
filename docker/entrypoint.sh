@@ -4,10 +4,8 @@
 
 set -e
 
-# Ensure we're in the workspace
-cd /workspace
-
 # Set up git URL rewriting for deploy keys
+# Note: Run from HOME, not workspace, to avoid worktree git path issues
 setup_deploy_keys() {
     local registry_file="/home/claude/.deploy-keys-registry.json"
 
@@ -41,16 +39,17 @@ for repo, info in registry.get("repos", {}).items():
     insteadof_https_no_ext = f"https://github.com/{repo}"
     new_url = f"git@github-{alias}:{repo}.git"
 
+    # Run git config from HOME to avoid worktree path issues
     subprocess.run([
-        "git", "config", "--global",
+        "git", "-C", "/home/claude", "config", "--global",
         f"url.{new_url}.insteadOf", insteadof_ssh
     ], check=True)
     subprocess.run([
-        "git", "config", "--global",
+        "git", "-C", "/home/claude", "config", "--global",
         f"url.{new_url}.insteadOf", insteadof_https
     ], check=True)
     subprocess.run([
-        "git", "config", "--global",
+        "git", "-C", "/home/claude", "config", "--global",
         f"url.{new_url}.insteadOf", insteadof_https_no_ext
     ], check=True)
 
@@ -98,6 +97,12 @@ setup_safety_hook() {
 
 # Configure deploy keys if enabled
 if [ -n "$RC_USE_DEPLOY_KEYS" ]; then
+    # The mounted gitconfig is read-only, so copy to writable location
+    # and use GIT_CONFIG_GLOBAL to point git to the writable copy
+    if [ -f /home/claude/.gitconfig ]; then
+        cp /home/claude/.gitconfig /tmp/.gitconfig
+        export GIT_CONFIG_GLOBAL=/tmp/.gitconfig
+    fi
     setup_deploy_keys
 fi
 

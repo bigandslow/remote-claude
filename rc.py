@@ -30,16 +30,20 @@ class RemoteClaude:
             prefix=config.tmux.session_prefix,
         )
 
-    def generate_session_id(self, workspace_path: Path) -> str:
-        """Generate a unique session ID from workspace path.
+    def generate_session_id(self, workspace_path: Path, name: Optional[str] = None) -> str:
+        """Generate a unique session ID.
 
-        Uses workspace name prefix + cryptographically random suffix
+        Uses custom name or workspace name prefix + cryptographically random suffix
         for unpredictability while maintaining human readability.
+
+        Args:
+            workspace_path: Path to the workspace
+            name: Optional custom name to use instead of workspace name
         """
-        name = workspace_path.name
+        base_name = name if name else workspace_path.name
         # Use random hex instead of timestamp for unpredictability
         random_suffix = secrets.token_hex(4)  # 8 hex chars
-        return f"{name[:16]}-{random_suffix}"
+        return f"{base_name[:16]}-{random_suffix}"
 
     def start(
         self,
@@ -47,6 +51,7 @@ class RemoteClaude:
         attach: bool = True,
         prompt: Optional[str] = None,
         continue_session: bool = False,
+        name: Optional[str] = None,
     ) -> int:
         """Start a new Claude session.
 
@@ -55,6 +60,7 @@ class RemoteClaude:
             attach: Whether to attach to the session after starting
             prompt: Optional initial prompt for Claude
             continue_session: Whether to continue a previous Claude conversation
+            name: Optional custom session name
 
         Returns:
             Exit code (0 for success)
@@ -79,7 +85,7 @@ class RemoteClaude:
             print("Image built successfully.")
 
         # Generate session ID
-        session_id = self.generate_session_id(workspace_path)
+        session_id = self.generate_session_id(workspace_path, name)
         session_name = self.tmux.get_session_name(session_id)
 
         print(f"Starting session: {session_name}")
@@ -147,9 +153,6 @@ class RemoteClaude:
         # Create a combined view
         session_map = {s.name: s for s in sessions}
 
-        print(f"{'ID':<15} {'Status':<15} {'Workspace':<40} {'Tmux':<10}")
-        print("-" * 80)
-
         for container in containers:
             # Extract session ID from container name
             session_id = container.name.replace("rc-", "")
@@ -160,31 +163,42 @@ class RemoteClaude:
                 tmux_status = "no tmux"
 
             workspace = container.workspace or "unknown"
-            if len(workspace) > 38:
-                workspace = "..." + workspace[-35:]
 
-            print(
-                f"{session_id:<15} {container.status:<15} {workspace:<40} {tmux_status:<10}"
-            )
+            # Simple name for attach (portion before random suffix)
+            attach_name = session_id.rsplit("-", 1)[0] if "-" in session_id else session_id
+
+            print(f"{session_id}  [{tmux_status}]  {container.status}")
+            print(f"  attach: rc attach {attach_name}")
+            print(f"  workspace: {workspace}")
+            print()
 
         return 0
 
-    def attach(self, session_id: str) -> int:
+    def attach(self, session_id: Optional[str] = None) -> int:
         """Attach to an existing session.
 
         Args:
-            session_id: Session ID or partial match
+            session_id: Session ID or partial match. If None, shows interactive picker.
 
         Returns:
             Exit code
         """
+        containers = self.docker.list_containers()
+
+        if not containers:
+            print("No active sessions.")
+            return 1
+
+        # If no session_id provided, show interactive picker
+        if not session_id:
+            return self._interactive_attach(containers)
+
         # Find matching session
         sessions = self.tmux.list_sessions()
         matching = [s for s in sessions if session_id in s.name]
 
         if not matching:
             # Try container-based lookup
-            containers = self.docker.list_containers()
             for c in containers:
                 if session_id in c.name or session_id in c.id:
                     extracted_id = c.name.replace("rc-", "")
@@ -203,6 +217,70 @@ class RemoteClaude:
 
         self.tmux.attach_session(matching[0].name)
         return 0
+
+    def _interactive_attach(self, containers: list) -> int:
+        """Show interactive session picker for attach.
+
+        Args:
+            containers: List of Container objects
+
+        Returns:
+            Exit code
+        """
+        from datetime import datetime as dt
+
+        # Sort by created time, most recent first
+        def parse_created(c):
+            try:
+                # Format: "2026-01-22 12:44:05 -0800 PST"
+                # Parse just the datetime part
+                date_str = " ".join(c.created.split()[:2])
+                return dt.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+            except (ValueError, IndexError):
+                return dt.min
+
+        sorted_containers = sorted(containers, key=parse_created, reverse=True)
+
+        print("Select a session to attach:")
+        print()
+        for i, c in enumerate(sorted_containers, 1):
+            session_id = c.name.replace("rc-", "")
+            attach_name = session_id.rsplit("-", 1)[0] if "-" in session_id else session_id
+            print(f"  {i}) {attach_name:<20} {c.status}")
+
+        print()
+        try:
+            choice = input("Enter number (or q to quit): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 1
+
+        if not choice:
+            print("No input received.")
+            return 1
+
+        if choice.lower() == 'q':
+            return 0
+
+        try:
+            idx = int(choice) - 1
+        except ValueError:
+            print(f"Invalid input: '{choice}'")
+            return 1
+
+        if not (0 <= idx < len(sorted_containers)):
+            print(f"Invalid selection: {choice}. Enter 1-{len(sorted_containers)}.")
+            return 1
+
+        selected = sorted_containers[idx]
+        extracted_id = selected.name.replace("rc-", "")
+        session_name = self.tmux.get_session_name(extracted_id)
+        if self.tmux.session_exists(session_name):
+            self.tmux.attach_session(session_name)
+            return 0
+        else:
+            print(f"Error: Tmux session not found for {extracted_id}")
+            return 1
 
     def kill(self, session_id: str, force: bool = False) -> int:
         """Kill a session and its container.
@@ -461,6 +539,9 @@ Examples:
     start_parser = subparsers.add_parser("start", help="Start a new Claude session")
     start_parser.add_argument("workspace", help="Path to workspace/worktree")
     start_parser.add_argument(
+        "-n", "--name", help="Custom session name (default: derived from workspace)"
+    )
+    start_parser.add_argument(
         "-p", "--prompt", help="Initial prompt for Claude"
     )
     start_parser.add_argument(
@@ -480,7 +561,7 @@ Examples:
 
     # attach command
     attach_parser = subparsers.add_parser("attach", aliases=["a"], help="Attach to session")
-    attach_parser.add_argument("session_id", help="Session ID (partial match OK)")
+    attach_parser.add_argument("session_id", nargs="?", default=None, help="Session ID (partial match OK). If omitted, shows picker.")
 
     # kill command
     kill_parser = subparsers.add_parser("kill", aliases=["rm"], help="Kill a session")
@@ -539,6 +620,7 @@ Examples:
             attach=not args.no_attach,
             prompt=args.prompt,
             continue_session=args.continue_session,
+            name=args.name,
         )
     elif args.command in ("list", "ls"):
         return app.list_sessions(all_states=args.all)

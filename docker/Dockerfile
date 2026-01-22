@@ -57,9 +57,9 @@ RUN useradd -m -s /bin/bash claude \
 RUN mkdir -p /workspace && chown claude:claude /workspace
 
 # Create directories for credential mounts
+# Note: .gitconfig is a file, not a directory - don't create it
 RUN mkdir -p /home/claude/.anthropic \
     /home/claude/.ssh \
-    /home/claude/.gitconfig \
     /home/claude/.claude \
     /home/claude/.config/gcloud \
     && chown -R claude:claude /home/claude

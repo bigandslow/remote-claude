@@ -482,8 +482,8 @@ class DockerManager:
         Returns:
             List of Container objects
         """
-        # Use table format (plain format can hang on some Docker versions)
-        format_str = "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.CreatedAt}}"
+        # Use non-table format with tab separator (table format uses spaces, not tabs)
+        format_str = "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.CreatedAt}}"
         args = ["ps", "--format", format_str]
         if all_states:
             args.insert(1, "-a")
@@ -494,8 +494,7 @@ class DockerManager:
 
         containers = []
         lines = result.stdout.strip().split("\n")
-        # Skip header line (table format includes headers)
-        for line in lines[1:]:
+        for line in lines:
             if not line:
                 continue
             parts = line.split("\t")
