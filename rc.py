@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from lib.config import Config, load_config, save_config, get_config_path
+from lib.config import AccountProfile, Config, load_config, save_config, get_config_path
 from lib.docker_manager import DockerManager
 from lib.tmux_manager import TmuxManager
 
@@ -52,6 +52,7 @@ class RemoteClaude:
         prompt: Optional[str] = None,
         continue_session: bool = False,
         name: Optional[str] = None,
+        account: Optional[str] = None,
     ) -> int:
         """Start a new Claude session.
 
@@ -61,6 +62,7 @@ class RemoteClaude:
             prompt: Optional initial prompt for Claude
             continue_session: Whether to continue a previous Claude conversation
             name: Optional custom session name
+            account: Account profile name (uses default if None)
 
         Returns:
             Exit code (0 for success)
@@ -103,6 +105,7 @@ class RemoteClaude:
             session_id=session_id,
             workspace_path=workspace_path,
             env_vars=env_vars if env_vars else None,
+            account=account,
         )
 
         if not container_id:
@@ -166,8 +169,10 @@ class RemoteClaude:
 
             # Simple name for attach (portion before random suffix)
             attach_name = session_id.rsplit("-", 1)[0] if "-" in session_id else session_id
+            account_display = container.account or "default"
 
             print(f"{session_id}  [{tmux_status}]  {container.status}")
+            print(f"  account: {account_display}")
             print(f"  attach: rc attach {attach_name}")
             print(f"  workspace: {workspace}")
             print()
@@ -328,6 +333,363 @@ class RemoteClaude:
 
         return 0
 
+    def switch(self, session_id: str, account: str) -> int:
+        """Switch a session to a different account.
+
+        Stops the current container and starts a new one with the new account's
+        credentials. Workspace is preserved but Claude conversation starts fresh.
+
+        Args:
+            session_id: Session ID or partial match
+            account: Account profile name to switch to
+
+        Returns:
+            Exit code
+        """
+        # Validate account exists
+        if account not in self.config.accounts.profiles and account != "default":
+            print(f"Error: Account '{account}' not found in config")
+            print("Available accounts:")
+            print("  default")
+            for name in self.config.accounts.profiles:
+                print(f"  {name}")
+            return 1
+
+        # Find matching container
+        containers = self.docker.list_containers(all_states=True)
+        matching = [c for c in containers if session_id in c.name or session_id in c.id]
+
+        if not matching:
+            print(f"Error: No session found matching '{session_id}'")
+            return 1
+
+        if len(matching) > 1:
+            print(f"Multiple sessions match '{session_id}':")
+            for c in matching:
+                print(f"  {c.name}")
+            return 1
+
+        container = matching[0]
+        current_account = container.account or "default"
+
+        if current_account == account:
+            print(f"Session already using account '{account}'")
+            return 0
+
+        extracted_id = container.name.replace("rc-", "")
+        session_name = self.tmux.get_session_name(extracted_id)
+        workspace = container.workspace
+
+        if not workspace:
+            print("Error: Could not determine workspace for session")
+            return 1
+
+        print(f"Switching session from '{current_account}' to '{account}'...")
+        print("Note: Claude conversation will start fresh (workspace preserved)")
+
+        # Kill tmux session first
+        if self.tmux.session_exists(session_name):
+            self.tmux.kill_session(session_name)
+
+        # Stop and remove old container
+        self.docker.stop_container(container.name)
+        self.docker.remove_container(container.name, force=True)
+
+        # Start new container with new account
+        container_id = self.docker.start_container(
+            session_id=extracted_id,
+            workspace_path=Path(workspace),
+            account=account,
+        )
+
+        if not container_id:
+            print("Error: Failed to start new container")
+            return 1
+
+        # Create new tmux session
+        container_name = f"rc-{extracted_id}"
+        attach_cmd = f"docker attach {container_name}"
+
+        if not self.tmux.create_session(
+            session_name=session_name,
+            command=attach_cmd,
+            working_dir=workspace,
+        ):
+            print("Error: Failed to create tmux session")
+            return 1
+
+        print(f"Switched to account '{account}'")
+        print(f"Attach with: rc attach {extracted_id.rsplit('-', 1)[0]}")
+
+        return 0
+
+    def account_list(self) -> int:
+        """List configured accounts.
+
+        Returns:
+            Exit code
+        """
+        print("Configured accounts:")
+        print()
+
+        default_account = self.config.accounts.default
+
+        # Always show 'default' as an option (uses global credentials)
+        marker = " (active)" if default_account == "default" else ""
+        print(f"  default{marker}")
+        print("    Uses global credentials from 'credentials' config section")
+        print()
+
+        for name, profile in self.config.accounts.profiles.items():
+            marker = " (active)" if name == default_account else ""
+            print(f"  {name}{marker}")
+            if profile.anthropic:
+                print(f"    anthropic: {profile.anthropic}")
+            if profile.claude:
+                print(f"    claude: {profile.claude}")
+            if profile.git:
+                print(f"    git: {profile.git}")
+            if profile.ssh:
+                print(f"    ssh: {profile.ssh}")
+            if profile.claude_gcp:
+                print(f"    claude_gcp: {profile.claude_gcp}")
+            if not any([profile.anthropic, profile.claude, profile.git, profile.ssh, profile.claude_gcp]):
+                print("    (no overrides, uses global credentials)")
+            print()
+
+        return 0
+
+    def account_add(self, name: str) -> int:
+        """Add a new account profile with setup wizard.
+
+        Args:
+            name: Account profile name
+
+        Returns:
+            Exit code
+        """
+        import subprocess
+
+        # Validate name
+        if name == "default":
+            print("Error: 'default' is reserved for global credentials")
+            return 1
+
+        if name in self.config.accounts.profiles:
+            print(f"Error: Account '{name}' already exists")
+            return 1
+
+        print(f"Setting up account profile: {name}")
+        print()
+
+        # Define credential directories
+        anthropic_dir = Path.home() / f".anthropic-{name}"
+        claude_dir = Path.home() / f".claude-{name}"
+
+        # Create directories
+        print(f"Creating credential directories...")
+        anthropic_dir.mkdir(exist_ok=True)
+        claude_dir.mkdir(exist_ok=True)
+        print(f"  {anthropic_dir}")
+        print(f"  {claude_dir}")
+        print()
+
+        # Check if Docker image exists
+        if not self.docker.image_exists():
+            print(f"Docker image '{self.docker.image}' not found.")
+            print("Building image...")
+            if not self.docker.build_image():
+                print("Error: Failed to build Docker image")
+                return 1
+            print("Image built successfully.")
+            print()
+
+        # Launch temporary container for login
+        print("Launching temporary container for authentication...")
+        print("Run 'claude /login' to authenticate, then 'exit' when done.")
+        print()
+
+        container_name = f"rc-login-{name}-{secrets.token_hex(4)}"
+
+        # Build docker run command for interactive login
+        docker_args = [
+            "docker", "run", "-it", "--rm",
+            "--name", container_name,
+            "-v", f"{anthropic_dir}:/home/claude/.anthropic",
+            "-v", f"{claude_dir}:/home/claude/.claude-host",
+            self.docker.image,
+            "/bin/bash", "-c",
+            "echo 'Run: claude /login' && echo 'Then: exit' && exec bash"
+        ]
+
+        result = subprocess.run(docker_args)
+
+        if result.returncode != 0:
+            print()
+            print("Warning: Container exited with non-zero status")
+
+        # Check if credentials were created
+        api_key_file = anthropic_dir / "api_key"
+        credentials_file = anthropic_dir / "credentials.json"
+
+        if not api_key_file.exists() and not credentials_file.exists():
+            print()
+            print("Warning: No credentials found. Did you run 'claude /login'?")
+            confirm = input("Continue anyway? [y/N] ")
+            if confirm.lower() != "y":
+                print("Cancelled.")
+                return 1
+
+        print()
+
+        # Ask about git/ssh overrides
+        profile = AccountProfile(
+            anthropic=anthropic_dir,
+            claude=claude_dir,
+        )
+
+        print("Optional: Configure separate git/ssh credentials for this account?")
+        configure_git = input("Set up git/ssh overrides? [y/N] ")
+
+        if configure_git.lower() == "y":
+            print()
+            print("Enter paths (leave blank to use global credentials):")
+
+            git_path = input(f"  Git config path [default: use global]: ").strip()
+            if git_path:
+                expanded = Path(git_path).expanduser()
+                if expanded.exists():
+                    profile.git = expanded
+                else:
+                    print(f"    Warning: {expanded} does not exist")
+
+            ssh_path = input(f"  SSH directory path [default: use global]: ").strip()
+            if ssh_path:
+                expanded = Path(ssh_path).expanduser()
+                if expanded.exists():
+                    profile.ssh = expanded
+                else:
+                    print(f"    Warning: {expanded} does not exist")
+
+            gcp_path = input(f"  GCP credentials path [default: use global]: ").strip()
+            if gcp_path:
+                expanded = Path(gcp_path).expanduser()
+                if expanded.exists():
+                    profile.claude_gcp = expanded
+                else:
+                    print(f"    Warning: {expanded} does not exist")
+
+        # Save profile
+        self.config.accounts.profiles[name] = profile
+        save_config(self.config)
+
+        print()
+        print(f"Account '{name}' created successfully!")
+        print()
+        print("Usage:")
+        print(f"  rc start ~/project --account {name}")
+        print(f"  rc switch <session> {name}")
+
+        # Ask if this should be the default
+        print()
+        set_default = input(f"Set '{name}' as the default account? [y/N] ")
+        if set_default.lower() == "y":
+            self.config.accounts.default = name
+            save_config(self.config)
+            print(f"Default account set to '{name}'")
+
+        return 0
+
+    def account_remove(self, name: str, force: bool = False) -> int:
+        """Remove an account profile.
+
+        Args:
+            name: Account profile name
+            force: Skip confirmation prompts
+
+        Returns:
+            Exit code
+        """
+        import shutil
+
+        if name == "default":
+            print("Error: Cannot remove 'default' (use global credentials config)")
+            return 1
+
+        if name not in self.config.accounts.profiles:
+            print(f"Error: Account '{name}' not found")
+            return 1
+
+        profile = self.config.accounts.profiles[name]
+
+        # Check if any active sessions use this account
+        containers = self.docker.list_containers()
+        using_account = [c for c in containers if c.account == name]
+
+        if using_account:
+            print(f"Warning: {len(using_account)} active session(s) using account '{name}':")
+            for c in using_account:
+                print(f"  {c.name}")
+            print()
+            if not force:
+                confirm = input("Continue anyway? [y/N] ")
+                if confirm.lower() != "y":
+                    print("Cancelled.")
+                    return 0
+
+        # Confirm removal
+        if not force:
+            print(f"Remove account profile '{name}'?")
+            if profile.anthropic:
+                print(f"  anthropic: {profile.anthropic}")
+            if profile.claude:
+                print(f"  claude: {profile.claude}")
+            confirm = input("Confirm removal? [y/N] ")
+            if confirm.lower() != "y":
+                print("Cancelled.")
+                return 0
+
+        # Remove from config
+        del self.config.accounts.profiles[name]
+
+        # Update default if this was the default account
+        if self.config.accounts.default == name:
+            self.config.accounts.default = "default"
+            print(f"Default account reset to 'default'")
+
+        save_config(self.config)
+        print(f"Account '{name}' removed from config.")
+
+        # Offer to delete credential directories
+        dirs_to_delete = []
+        if profile.anthropic and profile.anthropic.exists():
+            dirs_to_delete.append(profile.anthropic)
+        if profile.claude and profile.claude.exists():
+            dirs_to_delete.append(profile.claude)
+
+        if dirs_to_delete:
+            print()
+            print("Credential directories:")
+            for d in dirs_to_delete:
+                print(f"  {d}")
+
+            if not force:
+                delete_dirs = input("Delete these directories? [y/N] ")
+            else:
+                delete_dirs = "n"
+
+            if delete_dirs.lower() == "y":
+                for d in dirs_to_delete:
+                    try:
+                        shutil.rmtree(d)
+                        print(f"  Deleted: {d}")
+                    except Exception as e:
+                        print(f"  Failed to delete {d}: {e}")
+            else:
+                print("Credential directories preserved.")
+
+        return 0
+
     def status(self) -> int:
         """Show detailed status of all sessions.
 
@@ -344,6 +706,7 @@ class RemoteClaude:
             print(f"\nSession: {container.name}")
             print(f"  Container ID: {container.id}")
             print(f"  Status: {container.status}")
+            print(f"  Account: {container.account or 'default'}")
             print(f"  Workspace: {container.workspace or 'unknown'}")
             print(f"  Created: {container.created}")
 
@@ -552,6 +915,10 @@ Examples:
         "--no-attach", action="store_true",
         help="Don't attach to session after starting"
     )
+    start_parser.add_argument(
+        "-a", "--account",
+        help="Account profile to use (default: from config)"
+    )
 
     # list command
     list_parser = subparsers.add_parser("list", aliases=["ls"], help="List sessions")
@@ -572,6 +939,27 @@ Examples:
 
     # status command
     subparsers.add_parser("status", help="Show detailed status")
+
+    # switch command
+    switch_parser = subparsers.add_parser("switch", help="Switch session to different account")
+    switch_parser.add_argument("session_id", help="Session ID (partial match OK)")
+    switch_parser.add_argument("account", help="Account profile to switch to")
+
+    # account command
+    account_parser = subparsers.add_parser("account", help="Manage account profiles")
+    account_subparsers = account_parser.add_subparsers(dest="account_command", help="Account commands")
+
+    account_subparsers.add_parser("list", help="List configured accounts")
+
+    account_add_parser = account_subparsers.add_parser("add", help="Add new account profile")
+    account_add_parser.add_argument("name", help="Account profile name")
+
+    account_remove_parser = account_subparsers.add_parser("remove", help="Remove account profile")
+    account_remove_parser.add_argument("name", help="Account profile name")
+    account_remove_parser.add_argument(
+        "-f", "--force", action="store_true",
+        help="Skip confirmation prompts"
+    )
 
     # logs command
     logs_parser = subparsers.add_parser("logs", help="Show session logs")
@@ -621,6 +1009,7 @@ Examples:
             prompt=args.prompt,
             continue_session=args.continue_session,
             name=args.name,
+            account=args.account,
         )
     elif args.command in ("list", "ls"):
         return app.list_sessions(all_states=args.all)
@@ -640,6 +1029,15 @@ Examples:
             attach=not args.no_attach,
             force=args.force,
         )
+    elif args.command == "switch":
+        return app.switch(args.session_id, args.account)
+    elif args.command == "account":
+        if args.account_command == "list" or args.account_command is None:
+            return app.account_list()
+        elif args.account_command == "add":
+            return app.account_add(args.name)
+        elif args.account_command == "remove":
+            return app.account_remove(args.name, force=args.force)
 
     return 0
 

@@ -71,6 +71,29 @@ class TmuxConfig:
 
 
 @dataclass
+class AccountProfile:
+    """Credential overrides for a specific account.
+
+    All fields are optional - unset fields fall back to global credentials.
+    """
+
+    anthropic: Optional[Path] = None
+    claude: Optional[Path] = None
+    git: Optional[Path] = None
+    ssh: Optional[Path] = None
+    claude_gcp: Optional[Path] = None
+
+
+@dataclass
+class AccountsConfig:
+    """Multi-account configuration."""
+
+    default: str = "default"  # Name of default account profile
+    on_rate_limit: str = "manual"  # "manual", "notify", or "auto"
+    profiles: dict[str, AccountProfile] = field(default_factory=dict)
+
+
+@dataclass
 class Config:
     """Main configuration container."""
 
@@ -79,6 +102,49 @@ class Config:
     credentials: CredentialsConfig = field(default_factory=CredentialsConfig)
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     tmux: TmuxConfig = field(default_factory=TmuxConfig)
+    accounts: AccountsConfig = field(default_factory=AccountsConfig)
+
+    def get_credentials_for_account(self, account_name: Optional[str] = None) -> CredentialsConfig:
+        """Get effective credentials for an account.
+
+        Args:
+            account_name: Account name, or None to use default account.
+
+        Returns:
+            CredentialsConfig with account overrides applied.
+        """
+        if account_name is None:
+            account_name = self.accounts.default
+
+        # Start with global credentials
+        creds = CredentialsConfig(
+            anthropic=self.credentials.anthropic,
+            git=self.credentials.git,
+            ssh=self.credentials.ssh,
+            claude=self.credentials.claude,
+            claude_git=self.credentials.claude_git,
+            claude_ssh=self.credentials.claude_ssh,
+            claude_gcp=self.credentials.claude_gcp,
+            deploy_keys_git=self.credentials.deploy_keys_git,
+            deploy_keys_ssh=self.credentials.deploy_keys_ssh,
+            deploy_keys_registry=self.credentials.deploy_keys_registry,
+        )
+
+        # Apply account-specific overrides if profile exists
+        if account_name in self.accounts.profiles:
+            profile = self.accounts.profiles[account_name]
+            if profile.anthropic:
+                creds.anthropic = profile.anthropic
+            if profile.claude:
+                creds.claude = profile.claude
+            if profile.git:
+                creds.git = profile.git
+            if profile.ssh:
+                creds.ssh = profile.ssh
+            if profile.claude_gcp:
+                creds.claude_gcp = profile.claude_gcp
+
+        return creds
 
 
 def get_config_path() -> Path:
@@ -157,6 +223,29 @@ def load_config() -> Config:
             "socket_name", config.tmux.socket_name
         )
 
+    # Accounts config
+    if "accounts" in data:
+        acct_data = data["accounts"]
+        config.accounts.default = acct_data.get("default", config.accounts.default)
+        config.accounts.on_rate_limit = acct_data.get(
+            "on_rate_limit", config.accounts.on_rate_limit
+        )
+        if "profiles" in acct_data:
+            for name, profile_data in acct_data["profiles"].items():
+                profile = AccountProfile()
+                if profile_data:  # profile_data can be None for empty profiles
+                    if "anthropic" in profile_data:
+                        profile.anthropic = Path(profile_data["anthropic"]).expanduser()
+                    if "claude" in profile_data:
+                        profile.claude = Path(profile_data["claude"]).expanduser()
+                    if "git" in profile_data:
+                        profile.git = Path(profile_data["git"]).expanduser()
+                    if "ssh" in profile_data:
+                        profile.ssh = Path(profile_data["ssh"]).expanduser()
+                    if "claude_gcp" in profile_data:
+                        profile.claude_gcp = Path(profile_data["claude_gcp"]).expanduser()
+                config.accounts.profiles[name] = profile
+
     return config
 
 
@@ -197,6 +286,29 @@ def save_config(config: Config) -> None:
 
     if config.docker.build_context:
         data["docker"]["build_context"] = str(config.docker.build_context)
+
+    # Accounts config (only if profiles exist)
+    if config.accounts.profiles:
+        profiles_data = {}
+        for name, profile in config.accounts.profiles.items():
+            profile_dict = {}
+            if profile.anthropic:
+                profile_dict["anthropic"] = str(profile.anthropic)
+            if profile.claude:
+                profile_dict["claude"] = str(profile.claude)
+            if profile.git:
+                profile_dict["git"] = str(profile.git)
+            if profile.ssh:
+                profile_dict["ssh"] = str(profile.ssh)
+            if profile.claude_gcp:
+                profile_dict["claude_gcp"] = str(profile.claude_gcp)
+            profiles_data[name] = profile_dict if profile_dict else None
+
+        data["accounts"] = {
+            "default": config.accounts.default,
+            "on_rate_limit": config.accounts.on_rate_limit,
+            "profiles": profiles_data,
+        }
 
     with open(config_path, "w") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)

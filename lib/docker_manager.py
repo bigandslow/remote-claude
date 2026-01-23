@@ -112,6 +112,7 @@ class Container:
     image: str
     created: str
     workspace: Optional[str] = None
+    account: Optional[str] = None
 
 
 class DockerManager:
@@ -120,6 +121,7 @@ class DockerManager:
     CONTAINER_PREFIX = "rc-"
     WORKSPACE_LABEL = "rc.workspace"
     SESSION_LABEL = "rc.session"
+    ACCOUNT_LABEL = "rc.account"
     PROXY_IMAGE = "rc-proxy:latest"
     PROXY_PREFIX = "rc-proxy-"
     NETWORK_PREFIX = "rc-net-"
@@ -254,6 +256,7 @@ class DockerManager:
         session_id: str,
         workspace_path: Path,
         env_vars: Optional[dict[str, str]] = None,
+        account: Optional[str] = None,
     ) -> Optional[str]:
         """Start a new container for a Claude session.
 
@@ -261,11 +264,15 @@ class DockerManager:
             session_id: Unique session identifier
             workspace_path: Path to the worktree/workspace to mount
             env_vars: Optional environment variables
+            account: Account profile name (uses default if None)
 
         Returns:
             Container ID if successful, None otherwise
         """
         container_name = f"{self.CONTAINER_PREFIX}{session_id}"
+
+        # Resolve account name
+        account_name = account if account else self.config.accounts.default
 
         # Build docker run command
         args = [
@@ -279,14 +286,16 @@ class DockerManager:
             f"{self.WORKSPACE_LABEL}={workspace_path}",
             "-l",
             f"{self.SESSION_LABEL}={session_id}",
+            "-l",
+            f"{self.ACCOUNT_LABEL}={account_name}",
             # Mount workspace read-write
             "-v",
             f"{workspace_path}:/workspace",
         ]
 
-        # Mount credentials read-only
+        # Mount credentials read-only (resolved for account)
         # Priority: deploy keys > bot account > personal credentials
-        creds = self.config.credentials
+        creds = self.config.get_credentials_for_account(account_name)
 
         if creds.anthropic.exists():
             args.extend(["-v", f"{creds.anthropic}:/home/claude/.anthropic:ro"])
@@ -513,19 +522,21 @@ class DockerManager:
                     )
                 )
 
-        # Get workspace labels
+        # Get workspace and account labels
         for container in containers:
             inspect_result = self._run_docker(
                 [
                     "inspect",
                     "--format",
-                    f"{{{{index .Config.Labels \"{self.WORKSPACE_LABEL}\"}}}}",
+                    f"{{{{index .Config.Labels \"{self.WORKSPACE_LABEL}\"}}}}|{{{{index .Config.Labels \"{self.ACCOUNT_LABEL}\"}}}}",
                     container.id,
                 ],
                 check=False,
             )
             if inspect_result.returncode == 0:
-                container.workspace = inspect_result.stdout.strip() or None
+                parts = inspect_result.stdout.strip().split("|")
+                container.workspace = parts[0] if parts[0] else None
+                container.account = parts[1] if len(parts) > 1 and parts[1] else None
 
         return containers
 
