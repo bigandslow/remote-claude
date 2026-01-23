@@ -87,7 +87,7 @@ setup_safety_hook() {
                 .hooks.PreToolUse //= [] |
                 .hooks.PreToolUse += [{
                     "matcher": "Bash",
-                    "hooks": [$hook]
+                    "hooks": [{"type": "command", "command": $hook}]
                 }]
             ' "$settings_file" > "$tmp_file"
             mv "$tmp_file" "$settings_file"

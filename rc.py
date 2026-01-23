@@ -19,6 +19,59 @@ from lib.docker_manager import DockerManager
 from lib.tmux_manager import TmuxManager
 
 
+def check_docker_running() -> bool:
+    """Check if Docker daemon is running."""
+    import subprocess
+    result = subprocess.run(
+        ["docker", "info"],
+        capture_output=True,
+        timeout=10,
+    )
+    return result.returncode == 0
+
+
+def ensure_docker_running() -> bool:
+    """Ensure Docker daemon is running, starting it if needed.
+
+    Returns:
+        True if Docker is running (or was started successfully)
+    """
+    import subprocess
+
+    if check_docker_running():
+        return True
+
+    print("Docker daemon is not running.")
+
+    # On macOS, try to start Docker Desktop
+    if sys.platform == "darwin":
+        response = input("Start Docker Desktop? [Y/n] ").strip().lower()
+        if response in ("", "y", "yes"):
+            print("Starting Docker Desktop...")
+            subprocess.run(["open", "-a", "Docker"], check=False)
+
+            # Wait for Docker to be ready (up to 60 seconds)
+            print("Waiting for Docker to start", end="", flush=True)
+            for _ in range(30):
+                time.sleep(2)
+                print(".", end="", flush=True)
+                if check_docker_running():
+                    print(" ready!")
+                    return True
+            print(" timeout")
+            print("Error: Docker did not start in time. Please start it manually.")
+            return False
+        else:
+            print("Please start Docker Desktop and try again.")
+            return False
+    else:
+        # Linux - suggest starting the service
+        print("Please start Docker daemon:")
+        print("  sudo systemctl start docker")
+        print("  # or: sudo service docker start")
+        return False
+
+
 class RemoteClaude:
     """Main application class for remote-claude."""
 
@@ -75,6 +128,10 @@ class RemoteClaude:
 
         if not workspace_path.is_dir():
             print(f"Error: Workspace path is not a directory: {workspace_path}")
+            return 1
+
+        # Ensure Docker is running
+        if not ensure_docker_running():
             return 1
 
         # Check if Docker image exists
