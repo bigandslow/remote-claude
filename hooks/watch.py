@@ -49,6 +49,7 @@ TMUX_SOCKET = "remote-claude"
 CHECK_INTERVAL = 30  # seconds between checks
 IDLE_THRESHOLD = 300  # seconds before considering session idle (5 min)
 PROMPT_NOTIFY_DELAY = 120  # seconds to wait before notifying about permission prompts (2 min)
+RATE_LIMIT_DEBOUNCE = 60  # seconds to wait before triggering rate limit action (avoid false positives)
 
 # Patterns that indicate Claude is waiting for input
 WAITING_PATTERNS = [
@@ -76,6 +77,18 @@ WORKING_PATTERNS = [
     r"⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏",  # Spinner
 ]
 
+# Patterns that indicate rate limiting (case insensitive)
+RATE_LIMIT_PATTERNS = [
+    r"rate\s*limit",
+    r"too\s+many\s+requests",
+    r"429",
+    r"quota\s*exceeded",
+    r"capacity\s*exceeded",
+    r"throttl",
+    r"try\s+again\s+later",
+    r"usage\s+limit",
+]
+
 
 class SessionState:
     """Track state of a session."""
@@ -90,6 +103,10 @@ class SessionState:
         self.last_prompt: Optional[str] = None  # Last permission prompt detected
         self.notified_prompt: Optional[str] = None  # Prompt we already notified about
         self.prompt_detected_at: Optional[float] = None  # When current prompt was first seen
+        # Rate limit tracking
+        self.rate_limit_detected_at: Optional[float] = None  # When rate limit was first seen
+        self.rate_limit_notified: bool = False  # Have we notified/acted on this rate limit?
+        self.rate_limit_count: int = 0  # Count of consecutive rate limit detections
 
 
 def run_tmux(args: List[str]) -> Optional[str]:
@@ -171,6 +188,163 @@ def is_actively_working(content: str) -> bool:
     return False
 
 
+def is_rate_limited(content: str) -> bool:
+    """Check if the content indicates rate limiting."""
+    if not content:
+        return False
+
+    # Check last 20 lines for rate limit indicators
+    lines = content.strip().split("\n")
+    last_lines = "\n".join(lines[-20:]) if len(lines) > 20 else content
+
+    for pattern in RATE_LIMIT_PATTERNS:
+        if re.search(pattern, last_lines, re.IGNORECASE):
+            return True
+
+    return False
+
+
+def get_container_account(session_name: str) -> Optional[str]:
+    """Get the account name for a session's container."""
+    # Extract session_id from session name (rc-{session_id})
+    if not session_name.startswith("rc-"):
+        return None
+
+    session_id = session_name[3:]  # Remove "rc-" prefix
+    container_name = f"rc-{session_id}"
+
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{index .Config.Labels \"rc.account\"}}", container_name],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+
+    return None
+
+
+def get_available_accounts() -> List[str]:
+    """Get list of configured account names."""
+    try:
+        # Add parent directory to path to import lib.config
+        lib_dir = Path(__file__).parent.parent
+        sys.path.insert(0, str(lib_dir))
+        from lib.config import load_config
+
+        config = load_config()
+        accounts = ["default"]
+        accounts.extend(config.accounts.profiles.keys())
+        return accounts
+    except Exception:
+        return ["default"]
+
+
+def get_rate_limit_mode() -> str:
+    """Get the configured rate limit handling mode."""
+    try:
+        lib_dir = Path(__file__).parent.parent
+        sys.path.insert(0, str(lib_dir))
+        from lib.config import load_config
+
+        config = load_config()
+        return config.accounts.on_rate_limit
+    except Exception:
+        return "manual"
+
+
+def handle_rate_limit(notification: Dict) -> None:
+    """Handle a rate limit notification based on configured mode.
+
+    Args:
+        notification: Rate limit notification dict with session, mode, accounts info
+    """
+    mode = notification.get("mode", "manual")
+    session = notification.get("session", "")
+    current_account = notification.get("current_account", "default")
+    available_accounts = notification.get("available_accounts", [])
+
+    if mode == "manual":
+        # Just log it, user handles manually
+        print(f"  Rate limit on '{current_account}'. Use 'rc switch {session} <account>' to switch.")
+        return
+
+    if mode == "notify":
+        # Send notification suggesting switch
+        if available_accounts:
+            message = (
+                f"Rate limit hit on account '{current_account}'.\n"
+                f"Available accounts: {', '.join(available_accounts)}\n"
+                f"Switch with: rc switch {session} {available_accounts[0]}"
+            )
+        else:
+            message = f"Rate limit hit on account '{current_account}'. No other accounts configured."
+
+        send_notification(
+            title="Rate Limit - Switch Account?",
+            message=message,
+            session=session,
+            priority="high",
+        )
+        return
+
+    if mode == "auto":
+        # Automatically switch to next available account
+        if not available_accounts:
+            print(f"  Auto-rotate failed: No other accounts configured")
+            send_notification(
+                title="Rate Limit - No Accounts",
+                message=f"Rate limit on '{current_account}' but no other accounts configured.",
+                session=session,
+                priority="high",
+            )
+            return
+
+        next_account = available_accounts[0]
+        print(f"  Auto-rotating from '{current_account}' to '{next_account}'...")
+
+        # Extract session_id from session name
+        session_id = session[3:] if session.startswith("rc-") else session
+
+        # Call rc switch
+        try:
+            rc_path = Path(__file__).parent.parent / "rc.py"
+            result = subprocess.run(
+                ["python3", str(rc_path), "switch", session_id, next_account],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                print(f"  Successfully switched to account '{next_account}'")
+                send_notification(
+                    title="Account Switched",
+                    message=f"Auto-switched from '{current_account}' to '{next_account}' due to rate limit.",
+                    session=session,
+                    priority="normal",
+                )
+            else:
+                print(f"  Switch failed: {result.stderr}")
+                send_notification(
+                    title="Auto-Switch Failed",
+                    message=f"Failed to switch to '{next_account}': {result.stderr[:100]}",
+                    session=session,
+                    priority="high",
+                )
+        except Exception as e:
+            print(f"  Switch error: {e}")
+            send_notification(
+                title="Auto-Switch Error",
+                message=f"Error switching accounts: {str(e)[:100]}",
+                session=session,
+                priority="high",
+            )
+
+
 def check_session(state: SessionState) -> Optional[Dict]:
     """Check a session and return notification info if needed."""
     content = capture_pane(state.name)
@@ -219,6 +393,40 @@ def check_session(state: SessionState) -> Optional[Dict]:
         state.last_prompt = None
         state.notified_prompt = None
         state.prompt_detected_at = None
+
+    # Check for rate limiting
+    rate_limited = is_rate_limited(content)
+    if rate_limited:
+        state.rate_limit_count += 1
+        if state.rate_limit_detected_at is None:
+            state.rate_limit_detected_at = now
+
+        # Debounce: only act after sustained rate limit detection
+        rate_limit_duration = now - state.rate_limit_detected_at
+        if rate_limit_duration >= RATE_LIMIT_DEBOUNCE and not state.rate_limit_notified:
+            state.rate_limit_notified = True
+            state.last_notification = now
+
+            current_account = get_container_account(state.name) or "default"
+            available_accounts = get_available_accounts()
+            other_accounts = [a for a in available_accounts if a != current_account]
+            mode = get_rate_limit_mode()
+
+            return {
+                "type": "rate_limit",
+                "title": "Rate Limit Detected",
+                "message": f"Session {state.name} hit rate limit on account '{current_account}'",
+                "session": state.name,
+                "current_account": current_account,
+                "available_accounts": other_accounts,
+                "mode": mode,
+                "priority": "high",
+            }
+    else:
+        # Reset rate limit tracking if no longer rate limited
+        state.rate_limit_detected_at = None
+        state.rate_limit_notified = False
+        state.rate_limit_count = 0
 
     # Determine if waiting for input (generic)
     waiting = is_waiting_for_input(content)
@@ -316,6 +524,9 @@ def watch_sessions(
                             message=notification["message"],
                             session=session_name,
                         )
+                    elif notif_type == "rate_limit":
+                        # Handle rate limit based on configured mode
+                        handle_rate_limit(notification)
                     else:
                         # Send regular notification
                         send_notification(
