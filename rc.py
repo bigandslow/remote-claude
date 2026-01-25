@@ -187,12 +187,49 @@ class RemoteClaude:
 
         print(f"Session created: {session_name}")
 
+        # Auto-select dark mode theme on first run
+        # Claude shows a theme picker on first start - send Enter to select default (dark mode)
+        self._auto_select_theme(session_name)
+
         if attach:
             print("Attaching to session... (use Ctrl+b d to detach)")
             time.sleep(0.5)  # Give tmux time to start
             self.tmux.attach_session(session_name)
 
         return 0
+
+    def _auto_select_theme(self, session_name: str) -> None:
+        """Auto-navigate Claude's first-run prompts.
+
+        Handles:
+        - Theme picker: sends Enter to select dark mode (default)
+        - Login method: sends Enter to select Claude subscription (option 1)
+        """
+        # Wait for Claude to boot and handle first-run prompts
+        # Check up to 20 times with 0.5s intervals (10 seconds max)
+        prompts_handled = set()
+
+        for _ in range(20):
+            time.sleep(0.5)
+            output = self.tmux.capture_pane(session_name, lines=50)
+            if not output:
+                continue
+
+            # Theme picker - send Enter to select dark mode (option 1, default)
+            if "Choose the text style" in output and "theme" not in prompts_handled:
+                self.tmux.send_keys(session_name, "", enter=True)
+                prompts_handled.add("theme")
+                continue
+
+            # Login method picker - send Enter to select Claude subscription (option 1)
+            if "Select login method" in output and "login" not in prompts_handled:
+                self.tmux.send_keys(session_name, "", enter=True)
+                prompts_handled.add("login")
+                continue
+
+            # If we see the main prompt or an error, we're done
+            if ">" in output or "Error" in output:
+                break
 
     def list_sessions(self, all_states: bool = False) -> int:
         """List all active sessions.
@@ -387,6 +424,47 @@ class RemoteClaude:
         self.docker.stop_container(container.name)
         self.docker.remove_container(container.name, force=True)
         print(f"Removed container: {container.name}")
+
+        return 0
+
+    def restart(self, session_id: str) -> int:
+        """Restart Claude in a session to pick up new configs.
+
+        Sends /exit to Claude, which triggers the entrypoint loop to restart
+        Claude with --continue (resuming the previous conversation).
+
+        Args:
+            session_id: Session ID or partial match
+
+        Returns:
+            Exit code
+        """
+        # Find matching container
+        containers = self.docker.list_containers()
+        matching = [c for c in containers if session_id in c.name or session_id in c.id]
+
+        if not matching:
+            print(f"Error: No session found matching '{session_id}'")
+            return 1
+
+        if len(matching) > 1:
+            print(f"Multiple sessions match '{session_id}':")
+            for c in matching:
+                print(f"  {c.name}")
+            return 1
+
+        container = matching[0]
+        extracted_id = container.name.replace("rc-", "")
+        session_name = self.tmux.get_session_name(extracted_id)
+
+        if not self.tmux.session_exists(session_name):
+            print(f"Error: tmux session not found: {session_name}")
+            return 1
+
+        # Send /exit to Claude to trigger restart
+        print(f"Restarting Claude in {session_name}...")
+        self.tmux.send_keys(session_name, "/exit", enter=True)
+        print("Sent /exit - Claude will restart with --continue")
 
         return 0
 
@@ -956,7 +1034,7 @@ Examples:
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # start command
-    start_parser = subparsers.add_parser("start", help="Start a new Claude session")
+    start_parser = subparsers.add_parser("start", aliases=["s"], help="Start a new Claude session")
     start_parser.add_argument("workspace", help="Path to workspace/worktree")
     start_parser.add_argument(
         "-n", "--name", help="Custom session name (default: derived from workspace)"
@@ -993,6 +1071,10 @@ Examples:
     kill_parser.add_argument(
         "-f", "--force", action="store_true", help="Force kill without confirmation"
     )
+
+    # restart command
+    restart_parser = subparsers.add_parser("restart", aliases=["r"], help="Restart Claude in a session")
+    restart_parser.add_argument("session_id", help="Session ID (partial match OK)")
 
     # status command
     subparsers.add_parser("status", help="Show detailed status")
@@ -1059,7 +1141,7 @@ Examples:
     app = RemoteClaude(config)
 
     # Dispatch commands
-    if args.command == "start":
+    if args.command in ("start", "s"):
         return app.start(
             workspace=args.workspace,
             attach=not args.no_attach,
@@ -1074,6 +1156,8 @@ Examples:
         return app.attach(args.session_id)
     elif args.command in ("kill", "rm"):
         return app.kill(args.session_id, force=args.force)
+    elif args.command in ("restart", "r"):
+        return app.restart(args.session_id)
     elif args.command == "status":
         return app.status()
     elif args.command == "logs":

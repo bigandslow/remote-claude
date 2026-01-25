@@ -7,13 +7,13 @@
 # - Claude Code: Pin to specific version, update intentionally
 # Run `docker pull` and rebuild periodically for security updates
 
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install system dependencies
-# Note: Versions managed by Ubuntu 22.04 package repository
+# Note: Versions managed by Ubuntu 24.04 package repository (Python 3.12)
 RUN apt-get update && apt-get install -y \
     curl \
     git \
@@ -73,6 +73,9 @@ WORKDIR /workspace
 
 # Set up git to use mounted config
 ENV GIT_CONFIG_GLOBAL=/home/claude/.gitconfig
+
+# Tell Claude where to find its config/credentials
+ENV CLAUDE_CONFIG_DIR=/home/claude/.claude
 
 # Default command runs Claude in YOLO mode
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

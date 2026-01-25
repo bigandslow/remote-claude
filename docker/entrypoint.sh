@@ -57,15 +57,50 @@ for repo, info in registry.get("repos", {}).items():
 EOF
 }
 
+# Skip onboarding prompts (theme selection, login, etc.)
+setup_onboarding_complete() {
+    local claude_json="/home/claude/.claude.json"
+    local host_claude_json="/home/claude/.claude-host.json"
+
+    # Start with host's .claude.json if available (has oauthAccount for login bypass)
+    # Otherwise create minimal file
+    if [ -f "$host_claude_json" ] && command -v jq &> /dev/null; then
+        # Copy host file and merge in required fields
+        jq '{
+            oauthAccount: .oauthAccount,
+            hasCompletedOnboarding: true,
+            lastOnboardingVersion: "99.0.0",
+            numStartups: 1
+        }' "$host_claude_json" > "$claude_json"
+    else
+        # Create minimal .claude.json to skip onboarding
+        cat > "$claude_json" << 'EOJSON'
+{
+  "hasCompletedOnboarding": true,
+  "lastOnboardingVersion": "99.0.0",
+  "numStartups": 1
+}
+EOJSON
+    fi
+    chmod 600 "$claude_json"
+}
+
 # Set up Claude settings with safety hook
 setup_safety_hook() {
     local claude_dir="/home/claude/.claude"
     local settings_file="$claude_dir/settings.json"
     local host_settings="/home/claude/.claude-host/settings.json"
+    local host_credentials="/home/claude/.claude-host/.credentials.json"
     local hook_path="/home/claude/.rc-hooks/safety.py"
 
     # Create claude config directory
     mkdir -p "$claude_dir"
+
+    # Copy credentials file if it exists (for subscription auth)
+    if [ -f "$host_credentials" ]; then
+        cp "$host_credentials" "$claude_dir/.credentials.json"
+        chmod 600 "$claude_dir/.credentials.json"
+    fi
 
     # Start with host settings if they exist, otherwise empty object
     if [ -f "$host_settings" ]; then
@@ -109,11 +144,40 @@ fi
 # Configure safety protections
 setup_safety_hook
 
-# If a prompt was passed, use it; otherwise start interactive
-if [ -n "$RC_PROMPT" ]; then
-    exec claude --dangerously-skip-permissions -p "$RC_PROMPT"
-elif [ -n "$RC_CONTINUE" ]; then
-    exec claude --dangerously-skip-permissions --continue
-else
-    exec claude --dangerously-skip-permissions
-fi
+# Skip onboarding prompts
+setup_onboarding_complete
+
+# Run Claude in a loop so /exit triggers a restart (picks up new MCP configs, etc.)
+# After first run, use --continue to resume the conversation
+first_run=true
+
+while true; do
+    if [ "$first_run" = true ]; then
+        first_run=false
+        if [ -n "$RC_PROMPT" ]; then
+            claude --dangerously-skip-permissions -p "$RC_PROMPT"
+        elif [ -n "$RC_CONTINUE" ]; then
+            claude --dangerously-skip-permissions --continue
+        else
+            claude --dangerously-skip-permissions
+        fi
+    else
+        # Restart: continue previous conversation
+        echo ""
+        echo "Restarting Claude (continuing previous session)..."
+        echo ""
+        claude --dangerously-skip-permissions --continue
+    fi
+
+    exit_code=$?
+
+    # If Claude exited with error, show message
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        echo "Claude exited with code $exit_code"
+    fi
+
+    echo ""
+    echo "Claude exited. Restarting in 2s... (Ctrl+C twice to stop container)"
+    sleep 2
+done

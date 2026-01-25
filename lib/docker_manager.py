@@ -332,6 +332,31 @@ class DockerManager:
         if creds.claude.exists():
             args.extend(["-v", f"{creds.claude}:/home/claude/.claude-host:ro"])
 
+        # Claude state file (~/.claude.json) - contains oauthAccount for login bypass
+        claude_json = Path.home() / ".claude.json"
+        if claude_json.exists():
+            args.extend(["-v", f"{claude_json}:/home/claude/.claude-host.json:ro"])
+
+        # Extract OAuth token for login bypass (CLAUDE_CODE_OAUTH_TOKEN)
+        # Priority: setup-token file > credentials.json
+        setup_token_file = creds.claude / ".setup-token"
+        credentials_file = creds.claude / ".credentials.json"
+
+        oauth_token = None
+        if setup_token_file.exists():
+            # Use long-lived setup token (generated via `claude setup-token`)
+            oauth_token = setup_token_file.read_text().strip()
+        elif credentials_file.exists():
+            # Fall back to credentials.json token
+            try:
+                cred_data = json.loads(credentials_file.read_text())
+                oauth_token = cred_data.get("claudeAiOauth", {}).get("accessToken")
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        if oauth_token:
+            args.extend(["-e", f"CLAUDE_CODE_OAUTH_TOKEN={oauth_token}"])
+
         # GCP credentials - handle WIF or service account key
         wif_temp_files: list[str] = []  # Track for cleanup after container starts
         if creds.claude_gcp and creds.claude_gcp.exists():
