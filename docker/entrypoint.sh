@@ -147,6 +147,12 @@ setup_safety_hook
 # Skip onboarding prompts
 setup_onboarding_complete
 
+# For setup mode, run once and exit (no loop)
+# For normal mode, run in a loop so /exit triggers restart
+if [ -n "$RC_SETUP_MODE" ]; then
+    exec claude --dangerously-skip-permissions
+fi
+
 # Run Claude in a loop so /exit triggers a restart (picks up new MCP configs, etc.)
 # After first run, use --continue to resume the conversation
 first_run=true

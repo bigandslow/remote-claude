@@ -8,6 +8,7 @@ Manages sandboxed Claude Code sessions in Docker containers with tmux persistenc
 import argparse
 import os
 import secrets
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -465,6 +466,95 @@ class RemoteClaude:
         print(f"Restarting Claude in {session_name}...")
         self.tmux.send_keys(session_name, "/exit", enter=True)
         print("Sent /exit - Claude will restart with --continue")
+
+        return 0
+
+    def setup(self) -> int:
+        """Run interactive setup to create a pre-configured image.
+
+        Starts a temporary container, lets user complete onboarding (theme,
+        login, etc.), then commits the container as remote-claude:configured.
+
+        Returns:
+            Exit code
+        """
+        # Ensure Docker is running
+        if not ensure_docker_running():
+            return 1
+
+        # Check if base image exists
+        if not self.docker.image_exists():
+            print(f"Docker image '{self.docker.image}' not found.")
+            print("Building image...")
+            if not self.docker.build_image():
+                print("Error: Failed to build Docker image")
+                return 1
+            print("Image built successfully.")
+
+        # Check if configured image already exists
+        if self.docker.configured_image_exists():
+            confirm = input(
+                f"Configured image already exists. Recreate? [y/N] "
+            )
+            if confirm.lower() != "y":
+                print("Cancelled.")
+                return 0
+            # Remove old configured image
+            subprocess.run(
+                ["docker", "rmi", self.docker.CONFIGURED_IMAGE],
+                capture_output=True,
+            )
+
+        # Clean up any existing setup container
+        self.docker.remove_setup_container()
+
+        print("Starting setup container...")
+        container_id = self.docker.start_setup_container()
+        if not container_id:
+            print("Error: Failed to start setup container")
+            return 1
+
+        print(f"Container started: {container_id}")
+        print()
+        print("=" * 60)
+        print("Complete the onboarding process:")
+        print("  1. Select theme (dark mode recommended)")
+        print("  2. Login with your account")
+        print("  3. Accept any security prompts")
+        print("  4. Once at the main prompt, type /exit to finish")
+        print("=" * 60)
+        print()
+
+        # Attach to the container interactively
+        try:
+            subprocess.run(
+                ["docker", "attach", self.docker.SETUP_CONTAINER],
+                check=False,
+            )
+        except KeyboardInterrupt:
+            print("\nSetup interrupted.")
+
+        # Ask if we should save the configured image
+        print()
+        confirm = input("Save this configuration as the base image? [Y/n] ")
+        if confirm.lower() == "n":
+            print("Discarding setup container...")
+            self.docker.remove_setup_container()
+            return 0
+
+        # Commit the container
+        print(f"Saving configured image as {self.docker.CONFIGURED_IMAGE}...")
+        if self.docker.commit_configured_image(self.docker.SETUP_CONTAINER):
+            print("Success! Future sessions will use this pre-configured image.")
+            print()
+            print("To start a session: rc start /path/to/workspace")
+        else:
+            print("Error: Failed to commit configured image")
+            self.docker.remove_setup_container()
+            return 1
+
+        # Clean up setup container
+        self.docker.remove_setup_container()
 
         return 0
 
@@ -1020,14 +1110,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  rc start ~/projects/myapp          Start a new Claude session
+  rc setup                           One-time setup (creates pre-configured image)
+  rc start ~/projects/myapp          Start a new session
   rc start ~/projects/myapp -p "Fix the bug in auth.py"
   rc start ~/projects/myapp -c       Continue previous conversation
-  rc teleport ~/projects/myapp       Move existing session into framework
+  rc restart myapp                   Restart session (picks up new MCP configs)
   rc list                            List active sessions
   rc attach myapp                    Attach to a session
   rc kill myapp                      Kill a session
-  rc status                          Show detailed status
         """,
     )
 
@@ -1113,6 +1203,9 @@ Examples:
     # build command
     subparsers.add_parser("build", help="Build Docker image")
 
+    # setup command
+    subparsers.add_parser("setup", help="Run interactive setup to create pre-configured image")
+
     # teleport command
     teleport_parser = subparsers.add_parser(
         "teleport", aliases=["tp"],
@@ -1164,6 +1257,8 @@ Examples:
         return app.logs(args.session_id, tail=args.tail, follow=args.follow)
     elif args.command == "build":
         return app.build()
+    elif args.command == "setup":
+        return app.setup()
     elif args.command in ("teleport", "tp"):
         return app.teleport(
             workspace=args.workspace,

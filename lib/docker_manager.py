@@ -125,6 +125,8 @@ class DockerManager:
     PROXY_IMAGE = "rc-proxy:latest"
     PROXY_PREFIX = "rc-proxy-"
     NETWORK_PREFIX = "rc-net-"
+    CONFIGURED_IMAGE = "remote-claude:configured"
+    SETUP_CONTAINER = "rc-setup"
 
     def __init__(self, config: Config):
         self.config = config
@@ -168,6 +170,76 @@ class DockerManager:
             check=False,
             capture=False,  # Show build output
         )
+        return result.returncode == 0
+
+    def configured_image_exists(self) -> bool:
+        """Check if the pre-configured image exists (with onboarding completed)."""
+        result = self._run_docker(
+            ["images", "--format", "table {{.Repository}}:{{.Tag}}"],
+            check=False,
+            capture=True,
+        )
+        if result.returncode != 0:
+            return False
+        return self.CONFIGURED_IMAGE in result.stdout
+
+    def get_effective_image(self) -> str:
+        """Get the image to use for new containers.
+
+        Returns configured image if available, otherwise base image.
+        """
+        if self.configured_image_exists():
+            return self.CONFIGURED_IMAGE
+        return self.image
+
+    def commit_configured_image(self, container_name: str) -> bool:
+        """Commit a container as the pre-configured image.
+
+        Args:
+            container_name: Name of container to commit
+
+        Returns:
+            True if commit succeeded
+        """
+        result = self._run_docker(
+            ["commit", container_name, self.CONFIGURED_IMAGE],
+            check=False,
+            capture=True,
+        )
+        return result.returncode == 0
+
+    def start_setup_container(self) -> Optional[str]:
+        """Start a temporary container for initial setup/onboarding.
+
+        Returns:
+            Container ID if successful, None otherwise
+        """
+        # Create a temporary directory for setup workspace
+        setup_workspace = Path("/tmp/rc-setup-workspace")
+        setup_workspace.mkdir(exist_ok=True)
+
+        args = [
+            "run",
+            "-d",
+            "-it",
+            "--name", self.SETUP_CONTAINER,
+            "-v", f"{setup_workspace}:/workspace",
+            "-e", "RC_SETUP_MODE=1",  # Disable restart loop for setup
+        ]
+
+        # Add the image
+        args.append(self.image)
+
+        result = self._run_docker(args, check=False)
+        if result.returncode != 0:
+            return None
+
+        return result.stdout.strip()[:12]
+
+    def remove_setup_container(self) -> bool:
+        """Remove the setup container."""
+        self._run_docker(["stop", self.SETUP_CONTAINER], check=False, capture=True)
+        result = self._run_docker(["rm", "-f", self.SETUP_CONTAINER], check=False, capture=True)
         return result.returncode == 0
 
     def proxy_image_exists(self) -> bool:
@@ -455,8 +527,8 @@ class DockerManager:
             for key, value in env_vars.items():
                 args.extend(["-e", f"{key}={value}"])
 
-        # Image
-        args.append(self.image)
+        # Use configured image if available (has onboarding completed)
+        args.append(self.get_effective_image())
 
         result = self._run_docker(args, check=False)
         if result.returncode != 0:
