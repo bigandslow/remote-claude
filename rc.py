@@ -469,6 +469,99 @@ class RemoteClaude:
 
         return 0
 
+    def shell(self, session_id: Optional[str] = None) -> int:
+        """Open a shell in a session's container.
+
+        Args:
+            session_id: Session ID or partial match. If None, shows interactive picker.
+
+        Returns:
+            Exit code
+        """
+        containers = self.docker.list_containers()
+
+        if not containers:
+            print("No active sessions.")
+            return 1
+
+        # If no session_id provided, show interactive picker
+        if not session_id:
+            container = self._interactive_select(containers, "Select a session for shell:")
+            if not container:
+                return 1
+        else:
+            # Find matching container
+            matching = [c for c in containers if session_id in c.name or session_id in c.id]
+
+            if not matching:
+                print(f"Error: No session found matching '{session_id}'")
+                return 1
+
+            if len(matching) > 1:
+                print(f"Multiple sessions match '{session_id}':")
+                for c in matching:
+                    print(f"  {c.name}")
+                return 1
+
+            container = matching[0]
+
+        # Start interactive shell in the container
+        print(f"Opening shell in {container.name}...")
+        os.execvp("docker", ["docker", "exec", "-it", container.name, "/bin/bash"])
+
+        return 0
+
+    def _interactive_select(self, containers: list, prompt: str):
+        """Show interactive session picker.
+
+        Args:
+            containers: List of Container objects
+            prompt: Prompt to display
+
+        Returns:
+            Selected Container or None if cancelled
+        """
+        from datetime import datetime as dt
+
+        # Sort by created time, most recent first
+        def parse_created(c):
+            try:
+                date_str = " ".join(c.created.split()[:2])
+                return dt.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+            except (ValueError, IndexError):
+                return dt.min
+
+        sorted_containers = sorted(containers, key=parse_created, reverse=True)
+
+        print(prompt)
+        print()
+        for i, c in enumerate(sorted_containers, 1):
+            session_id = c.name.replace("rc-", "")
+            attach_name = session_id.rsplit("-", 1)[0] if "-" in session_id else session_id
+            print(f"  {i}) {attach_name:<20} {c.status}")
+
+        print()
+        try:
+            choice = input("Enter number (or q to quit): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+
+        if not choice or choice.lower() == 'q':
+            return None
+
+        try:
+            idx = int(choice) - 1
+        except ValueError:
+            print(f"Invalid input: '{choice}'")
+            return None
+
+        if not (0 <= idx < len(sorted_containers)):
+            print(f"Invalid selection: {choice}. Enter 1-{len(sorted_containers)}.")
+            return None
+
+        return sorted_containers[idx]
+
     def setup(self) -> int:
         """Run interactive setup to create a pre-configured image.
 
@@ -1166,6 +1259,10 @@ Examples:
     restart_parser = subparsers.add_parser("restart", aliases=["r"], help="Restart Claude in a session")
     restart_parser.add_argument("session_id", help="Session ID (partial match OK)")
 
+    # shell command
+    shell_parser = subparsers.add_parser("shell", aliases=["sh"], help="Open shell in a session's container")
+    shell_parser.add_argument("session_id", nargs="?", default=None, help="Session ID (partial match OK). If omitted, shows picker.")
+
     # status command
     subparsers.add_parser("status", help="Show detailed status")
 
@@ -1251,6 +1348,8 @@ Examples:
         return app.kill(args.session_id, force=args.force)
     elif args.command in ("restart", "r"):
         return app.restart(args.session_id)
+    elif args.command in ("shell", "sh"):
+        return app.shell(args.session_id)
     elif args.command == "status":
         return app.status()
     elif args.command == "logs":
