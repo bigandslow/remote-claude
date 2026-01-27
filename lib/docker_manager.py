@@ -12,6 +12,49 @@ from typing import Optional
 from .config import Config
 
 
+def _get_worktree_gitdir(workspace_path: Path) -> Optional[Path]:
+    """Check if a workspace is a git worktree and get the parent .git directory.
+
+    Git worktrees have a .git file (not directory) containing:
+        gitdir: /path/to/main/repo/.git/worktrees/<name>
+
+    For containers to use git in a worktree, we need to mount the parent
+    repo's .git directory.
+
+    Args:
+        workspace_path: Path to the workspace directory
+
+    Returns:
+        Path to the parent repo's .git directory if this is a worktree, None otherwise
+    """
+    git_path = workspace_path / ".git"
+
+    if not git_path.exists():
+        return None
+
+    # If .git is a directory, this is a regular repo (not a worktree)
+    if git_path.is_dir():
+        return None
+
+    # Read the gitdir pointer from the .git file
+    try:
+        content = git_path.read_text().strip()
+        if not content.startswith("gitdir:"):
+            return None
+
+        # Extract the path: "gitdir: /path/to/.git/worktrees/name"
+        gitdir_path = Path(content.split(":", 1)[1].strip())
+
+        # The parent .git dir is two levels up from .git/worktrees/<name>
+        # e.g., /repo/.git/worktrees/branch -> /repo/.git
+        if gitdir_path.parent.name == "worktrees":
+            return gitdir_path.parent.parent
+
+        return None
+    except (OSError, ValueError):
+        return None
+
+
 # Track temp files for secure cleanup (WIF tokens, credential configs)
 _TEMP_FILES_TO_CLEANUP: set[str] = set()
 
@@ -364,6 +407,13 @@ class DockerManager:
             "-v",
             f"{workspace_path}:/workspace",
         ]
+
+        # If workspace is a git worktree, also mount the parent repo's .git directory
+        # This allows git commands to work inside the container
+        worktree_gitdir = _get_worktree_gitdir(workspace_path)
+        if worktree_gitdir and worktree_gitdir.exists():
+            # Mount the parent .git at the same path so the gitdir reference works
+            args.extend(["-v", f"{worktree_gitdir}:{worktree_gitdir}:ro"])
 
         # Mount credentials read-only (resolved for account)
         # Priority: deploy keys > bot account > personal credentials

@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y \
     sudo \
     ca-certificates \
     gnupg \
+    vim-tiny \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 20.x LTS
@@ -71,8 +72,8 @@ COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 USER claude
 WORKDIR /workspace
 
-# Set up git to use mounted config
-ENV GIT_CONFIG_GLOBAL=/home/claude/.gitconfig
+# Note: GIT_CONFIG_GLOBAL is set at runtime by entrypoint.sh
+# to allow for deploy key configuration
 
 # Tell Claude where to find its config/credentials
 ENV CLAUDE_CONFIG_DIR=/home/claude/.claude

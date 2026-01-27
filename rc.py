@@ -283,98 +283,15 @@ class RemoteClaude:
         Returns:
             Exit code
         """
-        containers = self.docker.list_containers()
-
-        if not containers:
-            print("No active sessions.")
+        container = self._find_or_select_container(
+            session_id, "Select a session to attach:"
+        )
+        if not container:
             return 1
 
-        # If no session_id provided, show interactive picker
-        if not session_id:
-            return self._interactive_attach(containers)
-
-        # Find matching session
-        sessions = self.tmux.list_sessions()
-        matching = [s for s in sessions if session_id in s.name]
-
-        if not matching:
-            # Try container-based lookup
-            for c in containers:
-                if session_id in c.name or session_id in c.id:
-                    extracted_id = c.name.replace("rc-", "")
-                    session_name = self.tmux.get_session_name(extracted_id)
-                    if self.tmux.session_exists(session_name):
-                        self.tmux.attach_session(session_name)
-                        return 0
-            print(f"Error: No session found matching '{session_id}'")
-            return 1
-
-        if len(matching) > 1:
-            print(f"Multiple sessions match '{session_id}':")
-            for s in matching:
-                print(f"  {s.name}")
-            return 1
-
-        self.tmux.attach_session(matching[0].name)
-        return 0
-
-    def _interactive_attach(self, containers: list) -> int:
-        """Show interactive session picker for attach.
-
-        Args:
-            containers: List of Container objects
-
-        Returns:
-            Exit code
-        """
-        from datetime import datetime as dt
-
-        # Sort by created time, most recent first
-        def parse_created(c):
-            try:
-                # Format: "2026-01-22 12:44:05 -0800 PST"
-                # Parse just the datetime part
-                date_str = " ".join(c.created.split()[:2])
-                return dt.strptime(date_str, "%Y-%m-%d %H:%M:%S")
-            except (ValueError, IndexError):
-                return dt.min
-
-        sorted_containers = sorted(containers, key=parse_created, reverse=True)
-
-        print("Select a session to attach:")
-        print()
-        for i, c in enumerate(sorted_containers, 1):
-            session_id = c.name.replace("rc-", "")
-            attach_name = session_id.rsplit("-", 1)[0] if "-" in session_id else session_id
-            print(f"  {i}) {attach_name:<20} {c.status}")
-
-        print()
-        try:
-            choice = input("Enter number (or q to quit): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 1
-
-        if not choice:
-            print("No input received.")
-            return 1
-
-        if choice.lower() == 'q':
-            return 0
-
-        try:
-            idx = int(choice) - 1
-        except ValueError:
-            print(f"Invalid input: '{choice}'")
-            return 1
-
-        if not (0 <= idx < len(sorted_containers)):
-            print(f"Invalid selection: {choice}. Enter 1-{len(sorted_containers)}.")
-            return 1
-
-        selected = sorted_containers[idx]
-        extracted_id = selected.name.replace("rc-", "")
+        extracted_id = container.name.replace("rc-", "")
         session_name = self.tmux.get_session_name(extracted_id)
+
         if self.tmux.session_exists(session_name):
             self.tmux.attach_session(session_name)
             return 0
@@ -382,31 +299,22 @@ class RemoteClaude:
             print(f"Error: Tmux session not found for {extracted_id}")
             return 1
 
-    def kill(self, session_id: str, force: bool = False) -> int:
+    def kill(self, session_id: Optional[str] = None, force: bool = False) -> int:
         """Kill a session and its container.
 
         Args:
-            session_id: Session ID or partial match
+            session_id: Session ID or partial match. If None, shows picker.
             force: Force kill without confirmation
 
         Returns:
             Exit code
         """
-        # Find matching container
-        containers = self.docker.list_containers(all_states=True)
-        matching = [c for c in containers if session_id in c.name or session_id in c.id]
-
-        if not matching:
-            print(f"Error: No session found matching '{session_id}'")
+        container = self._find_or_select_container(
+            session_id, "Select a session to kill:", all_states=True
+        )
+        if not container:
             return 1
 
-        if len(matching) > 1:
-            print(f"Multiple sessions match '{session_id}':")
-            for c in matching:
-                print(f"  {c.name}")
-            return 1
-
-        container = matching[0]
         extracted_id = container.name.replace("rc-", "")
         session_name = self.tmux.get_session_name(extracted_id)
 
@@ -428,33 +336,24 @@ class RemoteClaude:
 
         return 0
 
-    def restart(self, session_id: str) -> int:
+    def restart(self, session_id: Optional[str] = None) -> int:
         """Restart Claude in a session to pick up new configs.
 
         Sends /exit to Claude, which triggers the entrypoint loop to restart
         Claude with --continue (resuming the previous conversation).
 
         Args:
-            session_id: Session ID or partial match
+            session_id: Session ID or partial match. If None, shows picker.
 
         Returns:
             Exit code
         """
-        # Find matching container
-        containers = self.docker.list_containers()
-        matching = [c for c in containers if session_id in c.name or session_id in c.id]
-
-        if not matching:
-            print(f"Error: No session found matching '{session_id}'")
+        container = self._find_or_select_container(
+            session_id, "Select a session to restart:"
+        )
+        if not container:
             return 1
 
-        if len(matching) > 1:
-            print(f"Multiple sessions match '{session_id}':")
-            for c in matching:
-                print(f"  {c.name}")
-            return 1
-
-        container = matching[0]
         extracted_id = container.name.replace("rc-", "")
         session_name = self.tmux.get_session_name(extracted_id)
 
@@ -478,32 +377,11 @@ class RemoteClaude:
         Returns:
             Exit code
         """
-        containers = self.docker.list_containers()
-
-        if not containers:
-            print("No active sessions.")
+        container = self._find_or_select_container(
+            session_id, "Select a session for shell:"
+        )
+        if not container:
             return 1
-
-        # If no session_id provided, show interactive picker
-        if not session_id:
-            container = self._interactive_select(containers, "Select a session for shell:")
-            if not container:
-                return 1
-        else:
-            # Find matching container
-            matching = [c for c in containers if session_id in c.name or session_id in c.id]
-
-            if not matching:
-                print(f"Error: No session found matching '{session_id}'")
-                return 1
-
-            if len(matching) > 1:
-                print(f"Multiple sessions match '{session_id}':")
-                for c in matching:
-                    print(f"  {c.name}")
-                return 1
-
-            container = matching[0]
 
         # Start interactive shell in the container
         print(f"Opening shell in {container.name}...")
@@ -561,6 +439,49 @@ class RemoteClaude:
             return None
 
         return sorted_containers[idx]
+
+    def _find_or_select_container(
+        self,
+        session_id: Optional[str],
+        prompt: str,
+        all_states: bool = False,
+    ):
+        """Find a container by ID or show interactive picker if no ID provided.
+
+        This is the unified helper for session selection across commands.
+
+        Args:
+            session_id: Session ID or partial match. If None, shows picker.
+            prompt: Prompt to display for interactive picker.
+            all_states: Include stopped containers in the list.
+
+        Returns:
+            Selected Container or None if not found/cancelled.
+        """
+        containers = self.docker.list_containers(all_states=all_states)
+
+        if not containers:
+            print("No active sessions.")
+            return None
+
+        # If no session_id provided, show interactive picker
+        if not session_id:
+            return self._interactive_select(containers, prompt)
+
+        # Find matching container
+        matching = [c for c in containers if session_id in c.name or session_id in c.id]
+
+        if not matching:
+            print(f"Error: No session found matching '{session_id}'")
+            return None
+
+        if len(matching) > 1:
+            print(f"Multiple sessions match '{session_id}':")
+            for c in matching:
+                print(f"  {c.name}")
+            return None
+
+        return matching[0]
 
     def setup(self) -> int:
         """Run interactive setup to create a pre-configured image.
@@ -1042,25 +963,24 @@ class RemoteClaude:
 
         return 0
 
-    def logs(self, session_id: str, tail: int = 100, follow: bool = False) -> int:
+    def logs(
+        self, session_id: Optional[str] = None, tail: int = 100, follow: bool = False
+    ) -> int:
         """Show logs for a session.
 
         Args:
-            session_id: Session ID or partial match
+            session_id: Session ID or partial match. If None, shows picker.
             tail: Number of lines to show
             follow: Follow log output
 
         Returns:
             Exit code
         """
-        containers = self.docker.list_containers(all_states=True)
-        matching = [c for c in containers if session_id in c.name or session_id in c.id]
-
-        if not matching:
-            print(f"Error: No session found matching '{session_id}'")
+        container = self._find_or_select_container(
+            session_id, "Select a session to view logs:", all_states=True
+        )
+        if not container:
             return 1
-
-        container = matching[0]
 
         if follow:
             self.docker.logs(container.name, tail=tail, follow=True)
@@ -1071,18 +991,77 @@ class RemoteClaude:
 
         return 0
 
-    def build(self) -> int:
+    def build(self, refresh: bool = False) -> int:
         """Build the Docker image.
+
+        Args:
+            refresh: If True, also update the configured image (preserves onboarding)
 
         Returns:
             Exit code
         """
         print(f"Building Docker image: {self.docker.image}")
-        if self.docker.build_image():
-            print("Build successful.")
+        if not self.docker.build_image():
+            print("Build failed.")
+            return 1
+        print("Build successful.")
+
+        if refresh and self.docker.configured_image_exists():
+            print()
+            print("Updating configured image...")
+            return self._refresh_configured_image()
+
+        return 0
+
+    def _refresh_configured_image(self) -> int:
+        """Update the configured image with new base image layers.
+
+        Preserves the onboarding state from the old configured image
+        while picking up entrypoint and other changes from the base image.
+
+        Returns:
+            Exit code
+        """
+        # Clean up any existing setup container
+        self.docker.remove_setup_container()
+
+        # Start a temp container from the NEW base image
+        print("Starting temporary container from base image...")
+        container_id = self.docker.start_setup_container()
+        if not container_id:
+            print("Error: Failed to start temporary container")
+            return 1
+
+        # Wait for entrypoint to complete initial setup
+        print("Running entrypoint setup...")
+        time.sleep(3)
+
+        # The container runs in setup mode (exits after first claude run)
+        # We just need the entrypoint to finish its setup
+        # Send Ctrl-C to exit claude, then wait for container
+        subprocess.run(
+            ["docker", "exec", self.docker.SETUP_CONTAINER, "pkill", "-INT", "claude"],
+            capture_output=True,
+        )
+        time.sleep(2)
+
+        # Remove old configured image
+        print(f"Removing old configured image...")
+        subprocess.run(
+            ["docker", "rmi", "-f", self.docker.CONFIGURED_IMAGE],
+            capture_output=True,
+        )
+
+        # Commit the container as new configured image
+        print(f"Saving as {self.docker.CONFIGURED_IMAGE}...")
+        if self.docker.commit_configured_image(self.docker.SETUP_CONTAINER):
+            print("Configured image updated successfully.")
+            # Clean up
+            self.docker.remove_setup_container()
             return 0
         else:
-            print("Build failed.")
+            print("Error: Failed to commit configured image")
+            self.docker.remove_setup_container()
             return 1
 
     def teleport(
@@ -1250,14 +1229,14 @@ Examples:
 
     # kill command
     kill_parser = subparsers.add_parser("kill", aliases=["rm"], help="Kill a session")
-    kill_parser.add_argument("session_id", help="Session ID (partial match OK)")
+    kill_parser.add_argument("session_id", nargs="?", default=None, help="Session ID (partial match OK). If omitted, shows picker.")
     kill_parser.add_argument(
         "-f", "--force", action="store_true", help="Force kill without confirmation"
     )
 
     # restart command
     restart_parser = subparsers.add_parser("restart", aliases=["r"], help="Restart Claude in a session")
-    restart_parser.add_argument("session_id", help="Session ID (partial match OK)")
+    restart_parser.add_argument("session_id", nargs="?", default=None, help="Session ID (partial match OK). If omitted, shows picker.")
 
     # shell command
     shell_parser = subparsers.add_parser("shell", aliases=["sh"], help="Open shell in a session's container")
@@ -1289,7 +1268,7 @@ Examples:
 
     # logs command
     logs_parser = subparsers.add_parser("logs", help="Show session logs")
-    logs_parser.add_argument("session_id", help="Session ID (partial match OK)")
+    logs_parser.add_argument("session_id", nargs="?", default=None, help="Session ID (partial match OK). If omitted, shows picker.")
     logs_parser.add_argument(
         "-n", "--tail", type=int, default=100, help="Number of lines (default: 100)"
     )
@@ -1298,7 +1277,11 @@ Examples:
     )
 
     # build command
-    subparsers.add_parser("build", help="Build Docker image")
+    build_parser = subparsers.add_parser("build", help="Build Docker image")
+    build_parser.add_argument(
+        "--refresh", action="store_true",
+        help="Rebuild base image and update configured image (preserves onboarding state)"
+    )
 
     # setup command
     subparsers.add_parser("setup", help="Run interactive setup to create pre-configured image")
@@ -1355,7 +1338,7 @@ Examples:
     elif args.command == "logs":
         return app.logs(args.session_id, tail=args.tail, follow=args.follow)
     elif args.command == "build":
-        return app.build()
+        return app.build(refresh=args.refresh)
     elif args.command == "setup":
         return app.setup()
     elif args.command in ("teleport", "tp"):

@@ -4,6 +4,32 @@
 
 set -e
 
+# Fix SSH config paths for container environment
+# The SSH config is generated on the host with host paths, but we need container paths
+fix_ssh_config_paths() {
+    local ssh_config="/home/claude/.ssh/config"
+
+    if [ ! -f "$ssh_config" ]; then
+        return 0
+    fi
+
+    # Copy to writable location and fix paths
+    cp "$ssh_config" /tmp/.ssh-config
+    # Replace any host path patterns with container path
+    # Host paths look like: /Users/*/.../.ssh/ or /home/*/.../.ssh/
+    sed -i 's|IdentityFile .*/\.ssh/|IdentityFile /home/claude/.ssh/|g' /tmp/.ssh-config
+
+    # Use the fixed config
+    mkdir -p /home/claude/.ssh-fixed
+    cp /tmp/.ssh-config /home/claude/.ssh-fixed/config
+    chmod 600 /home/claude/.ssh-fixed/config
+
+    # Point SSH to use the fixed config - persist to profile and bashrc for all shell types
+    export GIT_SSH_COMMAND="ssh -F /home/claude/.ssh-fixed/config"
+    echo 'export GIT_SSH_COMMAND="ssh -F /home/claude/.ssh-fixed/config"' >> /home/claude/.bashrc
+    echo 'export GIT_SSH_COMMAND="ssh -F /home/claude/.ssh-fixed/config"' >> /home/claude/.profile
+}
+
 # Set up git URL rewriting for deploy keys
 # Note: Run from HOME, not workspace, to avoid worktree git path issues
 setup_deploy_keys() {
@@ -12,6 +38,9 @@ setup_deploy_keys() {
     if [ ! -f "$registry_file" ]; then
         return 0
     fi
+
+    # Fix SSH config paths first
+    fix_ssh_config_paths
 
     echo "Configuring git for deploy keys..."
 
@@ -40,16 +69,17 @@ for repo, info in registry.get("repos", {}).items():
     new_url = f"git@github-{alias}:{repo}.git"
 
     # Run git config from HOME to avoid worktree path issues
+    # Use --add to allow multiple insteadOf values for the same URL
     subprocess.run([
-        "git", "-C", "/home/claude", "config", "--global",
+        "git", "-C", "/home/claude", "config", "--global", "--add",
         f"url.{new_url}.insteadOf", insteadof_ssh
     ], check=True)
     subprocess.run([
-        "git", "-C", "/home/claude", "config", "--global",
+        "git", "-C", "/home/claude", "config", "--global", "--add",
         f"url.{new_url}.insteadOf", insteadof_https
     ], check=True)
     subprocess.run([
-        "git", "-C", "/home/claude", "config", "--global",
+        "git", "-C", "/home/claude", "config", "--global", "--add",
         f"url.{new_url}.insteadOf", insteadof_https_no_ext
     ], check=True)
 
@@ -130,15 +160,21 @@ setup_safety_hook() {
     fi
 }
 
-# Configure deploy keys if enabled
+# Set up git config - default to mounted config, or writable copy for deploy keys
 if [ -n "$RC_USE_DEPLOY_KEYS" ]; then
-    # The mounted gitconfig is read-only, so copy to writable location
-    # and use GIT_CONFIG_GLOBAL to point git to the writable copy
+    # Deploy keys need a writable config to add insteadOf rules
     if [ -f /home/claude/.gitconfig ]; then
         cp /home/claude/.gitconfig /tmp/.gitconfig
-        export GIT_CONFIG_GLOBAL=/tmp/.gitconfig
     fi
+    export GIT_CONFIG_GLOBAL=/tmp/.gitconfig
+    echo 'export GIT_CONFIG_GLOBAL=/tmp/.gitconfig' >> /home/claude/.bashrc
+    echo 'export GIT_CONFIG_GLOBAL=/tmp/.gitconfig' >> /home/claude/.profile
     setup_deploy_keys
+elif [ -f /home/claude/.gitconfig ]; then
+    # Use mounted gitconfig directly
+    export GIT_CONFIG_GLOBAL=/home/claude/.gitconfig
+    echo 'export GIT_CONFIG_GLOBAL=/home/claude/.gitconfig' >> /home/claude/.bashrc
+    echo 'export GIT_CONFIG_GLOBAL=/home/claude/.gitconfig' >> /home/claude/.profile
 fi
 
 # Configure safety protections
