@@ -413,7 +413,8 @@ class DockerManager:
         worktree_gitdir = _get_worktree_gitdir(workspace_path)
         if worktree_gitdir and worktree_gitdir.exists():
             # Mount the parent .git at the same path so the gitdir reference works
-            args.extend(["-v", f"{worktree_gitdir}:{worktree_gitdir}:ro"])
+            # Must be read-write so git can create lock files in worktrees/
+            args.extend(["-v", f"{worktree_gitdir}:{worktree_gitdir}"])
 
         # Mount credentials read-only (resolved for account)
         # Priority: deploy keys > bot account > personal credentials
@@ -450,14 +451,58 @@ class DockerManager:
             if ssh_dir.exists():
                 args.extend(["-v", f"{ssh_dir}:/home/claude/.ssh:ro"])
 
-        # Claude settings (mounted to separate path, merged in entrypoint)
-        if creds.claude.exists():
-            args.extend(["-v", f"{creds.claude}:/home/claude/.claude-host:ro"])
+        # Claude config - selective mounts to avoid container polluting host config
+        claude_dir = creds.claude
+        if claude_dir.exists():
+            # Session history (read-write) - this is the main thing we want to persist
+            projects_dir = claude_dir / "projects"
+            if projects_dir.exists():
+                args.extend(["-v", f"{projects_dir}:/home/claude/.claude/projects"])
+
+            # Pass real workspace path so entrypoint can symlink -workspace to it
+            # Claude encodes paths by replacing / . and _ with -
+            encoded_path = str(workspace_path).replace("/", "-").replace(".", "-").replace("_", "-")
+            args.extend(["-e", f"RC_HOST_WORKSPACE_PATH={encoded_path}"])
+
+            # Credentials (read-only)
+            credentials_file = claude_dir / ".credentials.json"
+            if credentials_file.exists():
+                args.extend(["-v", f"{credentials_file}:/home/claude/.claude/.credentials.json:ro"])
+
+            # Setup token (read-only)
+            setup_token = claude_dir / ".setup-token"
+            if setup_token.exists():
+                args.extend(["-v", f"{setup_token}:/home/claude/.claude/.setup-token:ro"])
+
+            # Settings (read-only to prevent container changes affecting host)
+            settings_file = claude_dir / "settings.json"
+            if settings_file.exists():
+                args.extend(["-v", f"{settings_file}:/home/claude/.claude/settings.json:ro"])
+
+            # CLAUDE.md (read-write so container can update instructions)
+            claude_md = claude_dir / "CLAUDE.md"
+            if claude_md.exists():
+                args.extend(["-v", f"{claude_md}:/home/claude/.claude/CLAUDE.md"])
+
+            # Todos (read-write)
+            todos_dir = claude_dir / "todos"
+            if todos_dir.exists():
+                args.extend(["-v", f"{todos_dir}:/home/claude/.claude/todos"])
+
+            # Plans (read-write)
+            plans_dir = claude_dir / "plans"
+            if plans_dir.exists():
+                args.extend(["-v", f"{plans_dir}:/home/claude/.claude/plans"])
+
+            # Plugins (read-write)
+            plugins_dir = claude_dir / "plugins"
+            if plugins_dir.exists():
+                args.extend(["-v", f"{plugins_dir}:/home/claude/.claude/plugins"])
 
         # Claude state file (~/.claude.json) - contains oauthAccount for login bypass
         claude_json = Path.home() / ".claude.json"
         if claude_json.exists():
-            args.extend(["-v", f"{claude_json}:/home/claude/.claude-host.json:ro"])
+            args.extend(["-v", f"{claude_json}:/home/claude/.claude.json"])
 
         # Extract OAuth token for login bypass (CLAUDE_CODE_OAUTH_TOKEN)
         # Priority: setup-token file > credentials.json

@@ -87,75 +87,83 @@ for repo, info in registry.get("repos", {}).items():
 EOF
 }
 
-# Skip onboarding prompts (theme selection, login, etc.)
-setup_onboarding_complete() {
-    local claude_json="/home/claude/.claude.json"
-    local host_claude_json="/home/claude/.claude-host.json"
-
-    # Start with host's .claude.json if available (has oauthAccount for login bypass)
-    # Otherwise create minimal file
-    if [ -f "$host_claude_json" ] && command -v jq &> /dev/null; then
-        # Copy host file and merge in required fields
-        jq '{
-            oauthAccount: .oauthAccount,
-            hasCompletedOnboarding: true,
-            lastOnboardingVersion: "99.0.0",
-            numStartups: 1
-        }' "$host_claude_json" > "$claude_json"
-    else
-        # Create minimal .claude.json to skip onboarding
-        cat > "$claude_json" << 'EOJSON'
-{
-  "hasCompletedOnboarding": true,
-  "lastOnboardingVersion": "99.0.0",
-  "numStartups": 1
-}
-EOJSON
+# Set up workspace symlink for session persistence
+# Claude stores sessions in ~/.claude/projects/<path-encoded>/
+# In container, workspace is /workspace, but we want to use host path for portability
+setup_workspace_symlink() {
+    if [ -z "$RC_HOST_WORKSPACE_PATH" ]; then
+        return 0
     fi
-    chmod 600 "$claude_json"
+
+    local projects_dir="/home/claude/.claude/projects"
+    local container_path="-workspace"
+    local host_path="$RC_HOST_WORKSPACE_PATH"
+
+    mkdir -p "$projects_dir"
+
+    # If host path directory exists, symlink container path to it
+    # This allows sessions to persist and be accessible from host
+    # Note: Use -- to prevent paths starting with - being interpreted as options
+    if [ -d "$projects_dir/$host_path" ]; then
+        # Host has existing session data - symlink to it
+        if [ ! -L "$projects_dir/$container_path" ]; then
+            ln -sf -- "$host_path" "$projects_dir/$container_path"
+        fi
+    elif [ -d "$projects_dir/$container_path" ] && [ ! -L "$projects_dir/$container_path" ]; then
+        # Container has session data but host doesn't - move and symlink
+        mv -- "$projects_dir/$container_path" "$projects_dir/$host_path"
+        ln -sf -- "$host_path" "$projects_dir/$container_path"
+    else
+        # Neither exists yet - create host path dir and symlink
+        mkdir -p -- "$projects_dir/$host_path"
+        ln -sf -- "$host_path" "$projects_dir/$container_path"
+    fi
 }
 
 # Set up Claude settings with safety hook
+# Uses settings.local.json to avoid polluting host's settings.json
 setup_safety_hook() {
     local claude_dir="/home/claude/.claude"
-    local settings_file="$claude_dir/settings.json"
-    local host_settings="/home/claude/.claude-host/settings.json"
-    local host_credentials="/home/claude/.claude-host/.credentials.json"
+    local settings_local="$claude_dir/settings.local.json"
     local hook_path="/home/claude/.rc-hooks/safety.py"
 
-    # Create claude config directory
+    # Ensure claude config directory exists
     mkdir -p "$claude_dir"
 
-    # Copy credentials file if it exists (for subscription auth)
-    if [ -f "$host_credentials" ]; then
-        cp "$host_credentials" "$claude_dir/.credentials.json"
-        chmod 600 "$claude_dir/.credentials.json"
-    fi
-
-    # Start with host settings if they exist, otherwise empty object
-    if [ -f "$host_settings" ]; then
-        cp "$host_settings" "$settings_file"
-    else
-        echo '{}' > "$settings_file"
-    fi
-
-    # Add safety hook if it exists and jq is available
+    # Add safety hook to settings.local.json (not the main settings.json)
+    # This avoids polluting the host's settings when ~/.claude is mounted
     if [ -f "$hook_path" ] && command -v jq &> /dev/null; then
         local hook_cmd="python3 $hook_path"
 
-        # Check if hook already configured
-        if ! grep -q "safety.py" "$settings_file" 2>/dev/null; then
-            # Add the PreToolUse hook for Bash commands
-            local tmp_file=$(mktemp)
-            jq --arg hook "$hook_cmd" '
-                .hooks //= {} |
-                .hooks.PreToolUse //= [] |
-                .hooks.PreToolUse += [{
-                    "matcher": "Bash",
-                    "hooks": [{"type": "command", "command": $hook}]
-                }]
-            ' "$settings_file" > "$tmp_file"
-            mv "$tmp_file" "$settings_file"
+        # Create or update settings.local.json with the hook
+        if [ -f "$settings_local" ]; then
+            # Check if hook already configured
+            if ! grep -q "safety.py" "$settings_local" 2>/dev/null; then
+                local tmp_file=$(mktemp)
+                jq --arg hook "$hook_cmd" '
+                    .hooks //= {} |
+                    .hooks.PreToolUse //= [] |
+                    .hooks.PreToolUse += [{
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": $hook}]
+                    }]
+                ' "$settings_local" > "$tmp_file"
+                mv "$tmp_file" "$settings_local"
+            fi
+        else
+            # Create new settings.local.json with hook
+            cat > "$settings_local" << EOJSON
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": "$hook_cmd"}]
+      }
+    ]
+  }
+}
+EOJSON
         fi
     fi
 }
@@ -180,8 +188,8 @@ fi
 # Configure safety protections
 setup_safety_hook
 
-# Skip onboarding prompts
-setup_onboarding_complete
+# Set up workspace symlink for session persistence
+setup_workspace_symlink
 
 # For setup mode, run once and exit (no loop)
 # For normal mode, run in a loop so /exit triggers restart
