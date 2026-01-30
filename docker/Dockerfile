@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     gnupg \
     vim-tiny \
+    pre-commit \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 20.x LTS
