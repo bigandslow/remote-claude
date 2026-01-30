@@ -87,38 +87,6 @@ for repo, info in registry.get("repos", {}).items():
 EOF
 }
 
-# Set up workspace symlink for session persistence
-# Claude stores sessions in ~/.claude/projects/<path-encoded>/
-# In container, workspace is /workspace, but we want to use host path for portability
-setup_workspace_symlink() {
-    if [ -z "$RC_HOST_WORKSPACE_PATH" ]; then
-        return 0
-    fi
-
-    local projects_dir="/home/claude/.claude/projects"
-    local container_path="-workspace"
-    local host_path="$RC_HOST_WORKSPACE_PATH"
-
-    mkdir -p "$projects_dir"
-
-    # If host path directory exists, symlink container path to it
-    # This allows sessions to persist and be accessible from host
-    # Note: Use -- to prevent paths starting with - being interpreted as options
-    if [ -d "$projects_dir/$host_path" ]; then
-        # Host has existing session data - symlink to it
-        if [ ! -L "$projects_dir/$container_path" ]; then
-            ln -sf -- "$host_path" "$projects_dir/$container_path"
-        fi
-    elif [ -d "$projects_dir/$container_path" ] && [ ! -L "$projects_dir/$container_path" ]; then
-        # Container has session data but host doesn't - move and symlink
-        mv -- "$projects_dir/$container_path" "$projects_dir/$host_path"
-        ln -sf -- "$host_path" "$projects_dir/$container_path"
-    else
-        # Neither exists yet - create host path dir and symlink
-        mkdir -p -- "$projects_dir/$host_path"
-        ln -sf -- "$host_path" "$projects_dir/$container_path"
-    fi
-}
 
 # Set up Claude settings with safety hook
 # Uses settings.local.json to avoid polluting host's settings.json
@@ -187,9 +155,6 @@ fi
 
 # Configure safety protections
 setup_safety_hook
-
-# Set up workspace symlink for session persistence
-setup_workspace_symlink
 
 # For setup mode, run once and exit (no loop)
 # For normal mode, run in a loop so /exit triggers restart

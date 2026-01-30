@@ -95,6 +95,8 @@ class RemoteClaude:
             name: Optional custom name to use instead of workspace name
         """
         base_name = name if name else workspace_path.name
+        # Sanitize: dots break tmux target parsing (session.window.pane)
+        base_name = base_name.replace(".", "-")
         # Use random hex instead of timestamp for unpredictability
         random_suffix = secrets.token_hex(4)  # 8 hex chars
         return f"{base_name[:16]}-{random_suffix}"

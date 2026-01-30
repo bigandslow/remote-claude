@@ -454,15 +454,12 @@ class DockerManager:
         # Claude config - selective mounts to avoid container polluting host config
         claude_dir = creds.claude
         if claude_dir.exists():
-            # Session history (read-write) - this is the main thing we want to persist
-            projects_dir = claude_dir / "projects"
-            if projects_dir.exists():
-                args.extend(["-v", f"{projects_dir}:/home/claude/.claude/projects"])
-
-            # Pass real workspace path so entrypoint can symlink -workspace to it
+            # Session history (read-write) - mount only this workspace's project dir
             # Claude encodes paths by replacing / . and _ with -
             encoded_path = str(workspace_path).replace("/", "-").replace(".", "-").replace("_", "-")
-            args.extend(["-e", f"RC_HOST_WORKSPACE_PATH={encoded_path}"])
+            project_dir = claude_dir / "projects" / encoded_path
+            project_dir.mkdir(parents=True, exist_ok=True)
+            args.extend(["-v", f"{project_dir}:/home/claude/.claude/projects/-workspace"])
 
             # Credentials (read-only)
             credentials_file = claude_dir / ".credentials.json"
