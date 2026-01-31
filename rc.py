@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from lib.config import AccountProfile, Config, load_config, save_config, get_config_path
+from lib.config import AccountProfile, Config, load_config, load_project_config, save_config, get_config_path
 from lib.docker_manager import DockerManager
 from lib.tmux_manager import TmuxManager
 
@@ -160,12 +160,16 @@ class RemoteClaude:
         if continue_session:
             env_vars["RC_CONTINUE"] = "1"
 
+        # Load per-project configuration
+        project_config = load_project_config(workspace_path)
+
         # Start Docker container
         container_id = self.docker.start_container(
             session_id=session_id,
             workspace_path=workspace_path,
             env_vars=env_vars if env_vars else None,
             account=account,
+            project_config=project_config,
         )
 
         if not container_id:
@@ -636,11 +640,15 @@ class RemoteClaude:
         self.docker.stop_container(container.name)
         self.docker.remove_container(container.name, force=True)
 
+        # Load per-project configuration
+        project_config = load_project_config(Path(workspace))
+
         # Start new container with new account
         container_id = self.docker.start_container(
             session_id=extracted_id,
             workspace_path=Path(workspace),
             account=account,
+            project_config=project_config,
         )
 
         if not container_id:

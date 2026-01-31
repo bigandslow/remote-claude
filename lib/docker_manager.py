@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .config import Config
+from .config import Config, ProjectConfig
 
 
 def _get_worktree_gitdir(workspace_path: Path) -> Optional[Path]:
@@ -372,6 +372,7 @@ class DockerManager:
         workspace_path: Path,
         env_vars: Optional[dict[str, str]] = None,
         account: Optional[str] = None,
+        project_config: Optional[ProjectConfig] = None,
     ) -> Optional[str]:
         """Start a new container for a Claude session.
 
@@ -380,6 +381,7 @@ class DockerManager:
             workspace_path: Path to the worktree/workspace to mount
             env_vars: Optional environment variables
             account: Account profile name (uses default if None)
+            project_config: Optional per-project configuration
 
         Returns:
             Container ID if successful, None otherwise
@@ -521,6 +523,12 @@ class DockerManager:
         if oauth_token:
             args.extend(["-e", f"CLAUDE_CODE_OAUTH_TOKEN={oauth_token}"])
 
+        # GitHub CLI token (fine-grained PAT for gh commands)
+        if creds.github_token and creds.github_token.exists():
+            gh_token = creds.github_token.read_text().strip()
+            if gh_token:
+                args.extend(["-e", f"GH_TOKEN={gh_token}"])
+
         # GCP credentials - handle WIF or service account key
         wif_temp_files: list[str] = []  # Track for cleanup after container starts
         if creds.claude_gcp and creds.claude_gcp.exists():
@@ -568,6 +576,20 @@ class DockerManager:
         hooks_dir = Path(__file__).parent.parent / "hooks"
         if hooks_dir.exists():
             args.extend(["-v", f"{hooks_dir}:/home/claude/.rc-hooks:ro"])
+
+        # Mount project setup script if setup_commands are configured
+        if project_config and project_config.setup_commands:
+            setup_script = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".sh", delete=False, prefix="rc-setup-"
+            )
+            setup_script.write("#!/bin/bash\nset -e\n")
+            for cmd in project_config.setup_commands:
+                setup_script.write(f"{cmd}\n")
+            setup_script.close()
+            os.chmod(setup_script.name, 0o755)
+            _TEMP_FILES_TO_CLEANUP.add(setup_script.name)
+            args.extend(["-v", f"{setup_script.name}:/home/claude/.rc-setup.sh:ro"])
+            args.extend(["-e", "RC_HAS_SETUP_SCRIPT=1"])
 
         # Network mode
         proxy_container_id = None

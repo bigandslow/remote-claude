@@ -48,6 +48,9 @@ class CredentialsConfig:
     claude_ssh: Optional[Path] = None      # SSH keys for bot account
     claude_gcp: Optional[Path] = None      # GCP service account key
 
+    # GitHub CLI token (fine-grained PAT for gh commands)
+    github_token: Optional[Path] = None
+
     # Deploy key credentials (takes precedence over bot account if configured)
     deploy_keys_git: Optional[Path] = None       # Git config for deploy keys
     deploy_keys_ssh: Optional[Path] = None       # SSH directory with deploy keys
@@ -125,6 +128,7 @@ class Config:
             claude_git=self.credentials.claude_git,
             claude_ssh=self.credentials.claude_ssh,
             claude_gcp=self.credentials.claude_gcp,
+            github_token=self.credentials.github_token,
             deploy_keys_git=self.credentials.deploy_keys_git,
             deploy_keys_ssh=self.credentials.deploy_keys_ssh,
             deploy_keys_registry=self.credentials.deploy_keys_registry,
@@ -147,6 +151,49 @@ class Config:
         return creds
 
 
+@dataclass
+class ProjectConfig:
+    """Per-project configuration loaded from .rc/project.yaml."""
+
+    setup_commands: list[str] = field(default_factory=list)
+    features: dict[str, bool] = field(default_factory=dict)
+
+    def is_feature_enabled(self, name: str) -> bool:
+        """Check if a project feature is enabled."""
+        return self.features.get(name, False)
+
+
+def load_project_config(workspace_path: Path) -> ProjectConfig:
+    """Load per-project configuration from .rc/project.yaml.
+
+    Args:
+        workspace_path: Path to the workspace directory
+
+    Returns:
+        ProjectConfig with values from file, or defaults if file is missing
+    """
+    config_file = workspace_path / ".rc" / "project.yaml"
+
+    if not config_file.exists():
+        return ProjectConfig()
+
+    try:
+        with open(config_file) as f:
+            data = yaml.safe_load(f) or {}
+    except Exception:
+        return ProjectConfig()
+
+    config = ProjectConfig()
+
+    if "setup_commands" in data and isinstance(data["setup_commands"], list):
+        config.setup_commands = [str(cmd) for cmd in data["setup_commands"]]
+
+    if "features" in data and isinstance(data["features"], dict):
+        config.features = {str(k): bool(v) for k, v in data["features"].items()}
+
+    return config
+
+
 def get_config_path() -> Path:
     """Get the configuration file path."""
     xdg_config = os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
@@ -158,7 +205,12 @@ def load_config() -> Config:
     config_path = get_config_path()
 
     if not config_path.exists():
-        return Config()
+        config = Config()
+        # Default github_token path
+        default_gh_token = Path(xdg_config) / "remote-claude" / "github-token"
+        if default_gh_token.exists():
+            config.credentials.github_token = default_gh_token
+        return config
 
     with open(config_path) as f:
         data = yaml.safe_load(f) or {}
@@ -198,12 +250,20 @@ def load_config() -> Config:
         if "claude_gcp" in cred_data:
             config.credentials.claude_gcp = Path(cred_data["claude_gcp"]).expanduser()
         # Deploy key credentials (optional, takes precedence)
+        if "github_token" in cred_data:
+            config.credentials.github_token = Path(cred_data["github_token"]).expanduser()
         if "deploy_keys_git" in cred_data:
             config.credentials.deploy_keys_git = Path(cred_data["deploy_keys_git"]).expanduser()
         if "deploy_keys_ssh" in cred_data:
             config.credentials.deploy_keys_ssh = Path(cred_data["deploy_keys_ssh"]).expanduser()
         if "deploy_keys_registry" in cred_data:
             config.credentials.deploy_keys_registry = Path(cred_data["deploy_keys_registry"]).expanduser()
+
+    # Default github_token path if not explicitly configured
+    if config.credentials.github_token is None:
+        default_gh_token = config_path.parent / "github-token"
+        if default_gh_token.exists():
+            config.credentials.github_token = default_gh_token
 
     # Notifications config
     if "notifications" in data:
@@ -270,6 +330,7 @@ def save_config(config: Config) -> None:
             **({"claude_git": str(config.credentials.claude_git)} if config.credentials.claude_git else {}),
             **({"claude_ssh": str(config.credentials.claude_ssh)} if config.credentials.claude_ssh else {}),
             **({"claude_gcp": str(config.credentials.claude_gcp)} if config.credentials.claude_gcp else {}),
+            **({"github_token": str(config.credentials.github_token)} if config.credentials.github_token else {}),
             **({"deploy_keys_git": str(config.credentials.deploy_keys_git)} if config.credentials.deploy_keys_git else {}),
             **({"deploy_keys_ssh": str(config.credentials.deploy_keys_ssh)} if config.credentials.deploy_keys_ssh else {}),
             **({"deploy_keys_registry": str(config.credentials.deploy_keys_registry)} if config.credentials.deploy_keys_registry else {}),
