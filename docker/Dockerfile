@@ -21,6 +21,8 @@ RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
     python3-venv \
+    python-is-python3 \
+    netcat-openbsd \
     ripgrep \
     jq \
     sudo \
@@ -75,10 +77,16 @@ RUN mkdir -p /home/claude/.anthropic \
     /home/claude/.ssh \
     /home/claude/.claude \
     /home/claude/.config/gcloud \
-    && chown -R claude:claude /home/claude
+    /run/op-wrapper \
+    && chown -R claude:claude /home/claude \
+    && chown claude:claude /run/op-wrapper
 
 # Copy entrypoint script (must be done as root)
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# Copy 1Password proxy scripts for container-side op access
+COPY --chmod=755 scripts/op /usr/local/bin/op
+COPY --chmod=755 scripts/op-wrapper /usr/local/bin/op-wrapper
 
 # Switch to non-root user
 USER claude

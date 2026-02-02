@@ -572,6 +572,10 @@ class DockerManager:
                 args.extend(["-v", f"{creds.claude_gcp}:/home/claude/.config/gcloud/application_default_credentials.json:ro"])
                 args.extend(["-e", "GOOGLE_APPLICATION_CREDENTIALS=/home/claude/.config/gcloud/application_default_credentials.json"])
 
+        # Mount 1Password proxy socket if available
+        if creds.op_socket and creds.op_socket.exists():
+            args.extend(["-v", f"{creds.op_socket}:/run/op-wrapper/daemon.sock"])
+
         # Mount safety hooks for YOLO mode protection
         hooks_dir = Path(__file__).parent.parent / "hooks"
         if hooks_dir.exists():

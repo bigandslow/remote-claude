@@ -56,6 +56,9 @@ class CredentialsConfig:
     deploy_keys_ssh: Optional[Path] = None       # SSH directory with deploy keys
     deploy_keys_registry: Optional[Path] = None  # JSON registry of repo -> alias mappings
 
+    # 1Password proxy daemon socket
+    op_socket: Optional[Path] = field(default_factory=lambda: Path.home() / ".op-wrapper" / "daemon.sock")
+
 
 @dataclass
 class NotificationsConfig:
@@ -132,6 +135,7 @@ class Config:
             deploy_keys_git=self.credentials.deploy_keys_git,
             deploy_keys_ssh=self.credentials.deploy_keys_ssh,
             deploy_keys_registry=self.credentials.deploy_keys_registry,
+            op_socket=self.credentials.op_socket,
         )
 
         # Apply account-specific overrides if profile exists
@@ -258,6 +262,8 @@ def load_config() -> Config:
             config.credentials.deploy_keys_ssh = Path(cred_data["deploy_keys_ssh"]).expanduser()
         if "deploy_keys_registry" in cred_data:
             config.credentials.deploy_keys_registry = Path(cred_data["deploy_keys_registry"]).expanduser()
+        if "op_socket" in cred_data:
+            config.credentials.op_socket = Path(cred_data["op_socket"]).expanduser()
 
     # Default github_token path if not explicitly configured
     if config.credentials.github_token is None:
@@ -334,6 +340,7 @@ def save_config(config: Config) -> None:
             **({"deploy_keys_git": str(config.credentials.deploy_keys_git)} if config.credentials.deploy_keys_git else {}),
             **({"deploy_keys_ssh": str(config.credentials.deploy_keys_ssh)} if config.credentials.deploy_keys_ssh else {}),
             **({"deploy_keys_registry": str(config.credentials.deploy_keys_registry)} if config.credentials.deploy_keys_registry else {}),
+            **({"op_socket": str(config.credentials.op_socket)} if config.credentials.op_socket else {}),
         },
         "notifications": {
             "webhook_url": config.notifications.webhook_url,

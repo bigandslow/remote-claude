@@ -1,0 +1,40 @@
+#!/bin/bash
+#
+# op-wrapper - Container-side proxy for 1Password CLI
+#
+# Sends commands to the host's op-wrapper-daemon via a mounted Unix socket.
+# Only 'read' subcommands are permitted by the daemon.
+
+set -euo pipefail
+
+SOCKET_PATH="/run/op-wrapper/daemon.sock"
+
+if [ ! -S "$SOCKET_PATH" ]; then
+    echo "Error: 1Password proxy socket not available at $SOCKET_PATH" >&2
+    echo "Ensure op_socket is configured and the daemon is running on the host." >&2
+    exit 1
+fi
+
+response=$(echo "EXEC $*" | nc -U "$SOCKET_PATH" 2>/dev/null)
+
+if [ -z "$response" ]; then
+    echo "Error: No response from 1Password proxy daemon" >&2
+    exit 1
+fi
+
+status=$(echo "$response" | awk '{print $1}')
+payload=$(echo "$response" | cut -d' ' -f2-)
+
+case "$status" in
+    OK)
+        echo "$payload" | base64 -d
+        ;;
+    ERROR)
+        echo "Error: $payload" >&2
+        exit 1
+        ;;
+    *)
+        echo "Error: Unexpected response from daemon: $response" >&2
+        exit 1
+        ;;
+esac
