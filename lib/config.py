@@ -57,7 +57,7 @@ class CredentialsConfig:
     deploy_keys_registry: Optional[Path] = None  # JSON registry of repo -> alias mappings
 
     # 1Password proxy daemon socket
-    op_socket: Optional[Path] = field(default_factory=lambda: Path.home() / ".op-wrapper" / "daemon.sock")
+    op_socket: Optional[Path] = field(default_factory=lambda: Path.home() / ".op-wrapper" / "sock")
 
 
 @dataclass

@@ -572,9 +572,11 @@ class DockerManager:
                 args.extend(["-v", f"{creds.claude_gcp}:/home/claude/.config/gcloud/application_default_credentials.json:ro"])
                 args.extend(["-e", "GOOGLE_APPLICATION_CREDENTIALS=/home/claude/.config/gcloud/application_default_credentials.json"])
 
-        # Mount 1Password proxy socket if available
+        # Mount 1Password proxy socket directory if available
+        # This mounts the dedicated sock/ directory (not the socket file directly)
+        # because Docker Desktop for Mac cannot mount Unix sockets through the VM.
         if creds.op_socket and creds.op_socket.exists():
-            args.extend(["-v", f"{creds.op_socket}:/run/op-wrapper/daemon.sock"])
+            args.extend(["-v", f"{creds.op_socket}:/run/op-wrapper"])
 
         # Mount safety hooks for YOLO mode protection
         hooks_dir = Path(__file__).parent.parent / "hooks"
