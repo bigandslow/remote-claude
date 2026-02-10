@@ -65,3 +65,45 @@ tmux:
   session_prefix: rc
   # Tmux socket name (allows isolation from other tmux sessions)
   socket_name: remote-claude
+
+# Cloud infrastructure (optional)
+# Enables running sessions on cloud VMs via Tailscale
+# Supports DigitalOcean and Hetzner Cloud
+#
+# cloud:
+#   enabled: true
+#
+#   # Cloud provider: "digitalocean" or "hetzner"
+#   provider: digitalocean
+#
+#   # API token (stored in 1Password, fetched via op-wrapper)
+#   api_token_ref: "op://Infrastructure/DigitalOcean/api-token"
+#
+#   # Tailscale OAuth credentials for auto-provisioning auth keys
+#   tailscale_oauth_client_id: "k1234567890"
+#   tailscale_oauth_secret_ref: "op://Infrastructure/Tailscale/oauth-secret"
+#
+#   # Default server type and region for new nodes (provider-specific)
+#   # Leave blank to use provider defaults
+#   #
+#   # DigitalOcean:
+#   #   Server types: s-1vcpu-1gb ($6), s-2vcpu-4gb ($24), s-4vcpu-8gb ($48)
+#   #   Regions: nyc (NYC), sfo (SFO), lon (London), ams (Amsterdam), sgp (Singapore), tor (Toronto)
+#   #   Defaults: s-2vcpu-4gb, nyc3
+#   #
+#   # Hetzner:
+#   #   Server types: cpx11 ($4.35), cpx21 ($8.99), cpx31 ($16.49)
+#   #   Regions: ash (Ashburn), hil (Hillsboro), fsn (Falkenstein), nbg (Nuremberg), hel (Helsinki)
+#   #   Defaults: cpx21, ash
+#   #
+#   # default_server_type: s-2vcpu-4gb
+#   # default_region: nyc
+#
+#   # Session placement strategy: auto | manual | round-robin
+#   placement: auto
+#
+#   # Maximum concurrent sessions per cloud node
+#   max_sessions_per_node: 6
+#
+#   # Provisioned nodes (managed by 'rc cloud node add/remove')
+#   nodes: []

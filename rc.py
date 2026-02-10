@@ -15,7 +15,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from lib.config import AccountProfile, Config, load_config, load_project_config, save_config, get_config_path
+from lib.config import AccountProfile, CloudNodeConfig, Config, load_config, load_project_config, save_config, get_config_path
+from lib.cloud_docker_manager import CloudDockerManager
+from lib.cloud_manager import CloudManager, SessionRegistry
+from lib.cloud_tmux_manager import CloudTmuxManager
 from lib.docker_manager import DockerManager
 from lib.tmux_manager import TmuxManager
 
@@ -83,6 +86,8 @@ class RemoteClaude:
             socket_name=config.tmux.socket_name,
             prefix=config.tmux.session_prefix,
         )
+        self.cloud = CloudManager(config) if config.cloud.enabled else None
+        self.registry = SessionRegistry.load()
 
     def generate_session_id(self, workspace_path: Path, name: Optional[str] = None) -> str:
         """Generate a unique session ID.
@@ -109,6 +114,8 @@ class RemoteClaude:
         continue_session: bool = False,
         name: Optional[str] = None,
         account: Optional[str] = None,
+        cloud: bool = False,
+        node: Optional[str] = None,
     ) -> int:
         """Start a new Claude session.
 
@@ -119,6 +126,8 @@ class RemoteClaude:
             continue_session: Whether to continue a previous Claude conversation
             name: Optional custom session name
             account: Account profile name (uses default if None)
+            cloud: Start session on a cloud node instead of locally
+            node: Specific cloud node name (default: auto-place)
 
         Returns:
             Exit code (0 for success)
@@ -132,6 +141,18 @@ class RemoteClaude:
         if not workspace_path.is_dir():
             print(f"Error: Workspace path is not a directory: {workspace_path}")
             return 1
+
+        # Cloud session start
+        if cloud or node:
+            return self._start_cloud(
+                workspace_path=workspace_path,
+                attach=attach,
+                prompt=prompt,
+                continue_session=continue_session,
+                name=name,
+                account=account,
+                node_name=node,
+            )
 
         # Ensure Docker is running
         if not ensure_docker_running():
@@ -194,6 +215,14 @@ class RemoteClaude:
 
         print(f"Session created: {session_name}")
 
+        # Register in session registry
+        self.registry.register_session(
+            session_id=session_id,
+            location="local",
+            workspace=str(workspace_path),
+            account=account,
+        )
+
         # Auto-select dark mode theme on first run
         # Claude shows a theme picker on first start - send Enter to select default (dark mode)
         self._auto_select_theme(session_name)
@@ -205,32 +234,151 @@ class RemoteClaude:
 
         return 0
 
-    def _auto_select_theme(self, session_name: str) -> None:
+    def _start_cloud(
+        self,
+        workspace_path: Path,
+        attach: bool = True,
+        prompt: Optional[str] = None,
+        continue_session: bool = False,
+        name: Optional[str] = None,
+        account: Optional[str] = None,
+        node_name: Optional[str] = None,
+    ) -> int:
+        """Start a session on a cloud node.
+
+        Handles node selection, workspace sync, container + tmux creation,
+        and 1Password bridge.
+        """
+        if not self.cloud:
+            print("Error: Cloud not enabled in config")
+            print("Set cloud.enabled: true in ~/.config/remote-claude/config.yaml")
+            return 1
+
+        # Select node
+        node_config = self.cloud.select_node(node_name)
+        if not node_config:
+            if node_name:
+                print(f"Error: Cloud node '{node_name}' not found")
+            else:
+                print("Error: No available cloud nodes (all at max capacity or none configured)")
+                print("Run 'rc cloud node add' to provision a cloud node")
+            return 1
+
+        print(f"Using cloud node: {node_config.name}")
+
+        # Generate session ID
+        session_id = self.generate_session_id(workspace_path, name)
+
+        # Sync workspace to cloud
+        print(f"Syncing workspace to cloud...")
+        creds = self.config.get_credentials_for_account(account)
+        if not self.cloud.sync_to_cloud(node_config, workspace_path, session_id, creds.claude):
+            print("Error: Failed to sync workspace to cloud")
+            return 1
+
+        # Start 1Password bridge
+        self.cloud.start_op_bridge(node_config)
+
+        # Create cloud docker/tmux managers
+        cloud_docker = CloudDockerManager(self.config, node_config)
+        cloud_tmux = CloudTmuxManager(
+            node_config,
+            socket_name=self.config.tmux.socket_name,
+            prefix=self.config.tmux.session_prefix,
+        )
+
+        # Set up environment variables
+        env_vars = {}
+        if prompt:
+            env_vars["RC_PROMPT"] = prompt
+        if continue_session:
+            env_vars["RC_CONTINUE"] = "1"
+
+        # Load per-project configuration
+        project_config = load_project_config(workspace_path)
+
+        # Start container on cloud
+        print(f"Starting container on {node_config.name}...")
+        container_id = cloud_docker.start_container(
+            session_id=session_id,
+            workspace_path=workspace_path,
+            env_vars=env_vars if env_vars else None,
+            account=account,
+            project_config=project_config,
+        )
+
+        if not container_id:
+            print("Error: Failed to start container on cloud node")
+            return 1
+
+        print(f"Cloud container started: {container_id}")
+
+        # Create tmux session on cloud node
+        session_name = cloud_tmux.get_session_name(session_id)
+        container_name = f"rc-{session_id}"
+        attach_cmd = f"docker attach {container_name}"
+
+        if not cloud_tmux.create_session(
+            session_name=session_name,
+            command=attach_cmd,
+        ):
+            print("Error: Failed to create tmux session on cloud")
+            cloud_docker.remove_container(container_name, force=True)
+            return 1
+
+        print(f"Cloud session created: {session_name}")
+
+        # Register in session registry
+        self.registry.register_session(
+            session_id=session_id,
+            location="cloud",
+            node=node_config.name,
+            workspace=str(workspace_path),
+            account=account,
+        )
+
+        # Auto-select theme
+        self._auto_select_theme(session_name, cloud_tmux)
+
+        if attach:
+            print(f"Attaching to cloud session on {node_config.name}... (use Ctrl+b d to detach)")
+            time.sleep(0.5)
+            cloud_tmux.attach_session(session_name)
+
+        return 0
+
+    def _auto_select_theme(self, session_name: str, tmux: Optional[TmuxManager] = None) -> None:
         """Auto-navigate Claude's first-run prompts.
 
         Handles:
         - Theme picker: sends Enter to select dark mode (default)
         - Login method: sends Enter to select Claude subscription (option 1)
+
+        Args:
+            session_name: Tmux session name
+            tmux: Optional TmuxManager to use (default: self.tmux)
         """
+        tmux = tmux or self.tmux
+
         # Wait for Claude to boot and handle first-run prompts
         # Check up to 20 times with 0.5s intervals (10 seconds max)
         prompts_handled = set()
 
         for _ in range(20):
             time.sleep(0.5)
-            output = self.tmux.capture_pane(session_name, lines=50)
+            output = tmux.capture_pane(session_name, lines=50)
             if not output:
                 continue
 
             # Theme picker - send Enter to select dark mode (option 1, default)
             if "Choose the text style" in output and "theme" not in prompts_handled:
-                self.tmux.send_keys(session_name, "", enter=True)
+                tmux.send_keys(session_name, "", enter=True)
                 prompts_handled.add("theme")
                 continue
 
             # Login method picker - send Enter to select Claude subscription (option 1)
             if "Select login method" in output and "login" not in prompts_handled:
-                self.tmux.send_keys(session_name, "", enter=True)
+                tmux.send_keys(session_name, "", enter=True)
                 prompts_handled.add("login")
                 continue
 
@@ -239,7 +387,7 @@ class RemoteClaude:
                 break
 
     def list_sessions(self, all_states: bool = False) -> int:
-        """List all active sessions.
+        """List all active sessions (local and cloud).
 
         Args:
             all_states: Include stopped sessions
@@ -247,14 +395,18 @@ class RemoteClaude:
         Returns:
             Exit code
         """
+        # Local sessions
         containers = self.docker.list_containers(all_states=all_states)
         sessions = self.tmux.list_sessions()
 
-        if not containers and not sessions:
+        # Cloud sessions from registry
+        cloud_sessions = self.registry.cloud_sessions()
+
+        if not containers and not sessions and not cloud_sessions:
             print("No active sessions.")
             return 0
 
-        # Create a combined view
+        # Create a combined view for local sessions
         session_map = {s.name: s for s in sessions}
 
         for container in containers:
@@ -278,10 +430,32 @@ class RemoteClaude:
             print(f"  workspace: {workspace}")
             print()
 
+        # Cloud sessions
+        for session_id, data in cloud_sessions.items():
+            node_name = data.get("node", "?")
+            workspace = data.get("workspace", "unknown")
+            account_display = data.get("account") or "default"
+            attach_name = session_id.rsplit("-", 1)[0] if "-" in session_id else session_id
+
+            # Check if container is actually running on cloud
+            status = "cloud"
+            node_config = self.cloud.get_node_config(node_name) if self.cloud else None
+            if node_config:
+                cloud_docker = CloudDockerManager(self.config, node_config)
+                container = cloud_docker.get_container(session_id)
+                if container:
+                    status = container.status
+
+            print(f"{session_id}  [{node_name}]  {status}")
+            print(f"  account: {account_display}")
+            print(f"  attach: rc attach {attach_name}")
+            print(f"  workspace: {workspace}")
+            print()
+
         return 0
 
     def attach(self, session_id: Optional[str] = None) -> int:
-        """Attach to an existing session.
+        """Attach to an existing session (auto-detects local vs cloud).
 
         Args:
             session_id: Session ID or partial match. If None, shows interactive picker.
@@ -289,6 +463,13 @@ class RemoteClaude:
         Returns:
             Exit code
         """
+        # Check cloud registry first
+        if session_id:
+            cloud_match = self._find_cloud_session(session_id)
+            if cloud_match:
+                full_id, data = cloud_match
+                return self._attach_cloud(full_id, data)
+
         container = self._find_or_select_container(
             session_id, "Select a session to attach:"
         )
@@ -305,8 +486,31 @@ class RemoteClaude:
             print(f"Error: Tmux session not found for {extracted_id}")
             return 1
 
+    def _attach_cloud(self, session_id: str, session_data: dict) -> int:
+        """Attach to a cloud session via SSH."""
+        node_name = session_data.get("node")
+        if not node_name or not self.cloud:
+            print("Error: Cloud session has no node assignment")
+            return 1
+
+        node_config = self.cloud.get_node_config(node_name)
+        if not node_config:
+            print(f"Error: Cloud node '{node_name}' not found in config")
+            return 1
+
+        cloud_tmux = CloudTmuxManager(
+            node_config,
+            socket_name=self.config.tmux.socket_name,
+            prefix=self.config.tmux.session_prefix,
+        )
+        session_name = cloud_tmux.get_session_name(session_id)
+
+        print(f"Attaching to cloud session on {node_name}... (use Ctrl+b d to detach)")
+        cloud_tmux.attach_session(session_name)
+        return 0
+
     def kill(self, session_id: Optional[str] = None, force: bool = False) -> int:
-        """Kill a session and its container.
+        """Kill a session and its container (local or cloud).
 
         Args:
             session_id: Session ID or partial match. If None, shows picker.
@@ -315,6 +519,13 @@ class RemoteClaude:
         Returns:
             Exit code
         """
+        # Check cloud registry first
+        if session_id:
+            cloud_match = self._find_cloud_session(session_id)
+            if cloud_match:
+                full_id, data = cloud_match
+                return self._kill_cloud(full_id, data, force)
+
         container = self._find_or_select_container(
             session_id, "Select a session to kill:", all_states=True
         )
@@ -339,6 +550,57 @@ class RemoteClaude:
         self.docker.stop_container(container.name)
         self.docker.remove_container(container.name, force=True)
         print(f"Removed container: {container.name}")
+
+        # Remove from registry
+        self.registry.unregister_session(extracted_id)
+
+        return 0
+
+    def _kill_cloud(self, session_id: str, session_data: dict, force: bool = False) -> int:
+        """Kill a cloud session."""
+        node_name = session_data.get("node")
+        if not node_name or not self.cloud:
+            print("Error: Cloud session has no node assignment")
+            return 1
+
+        node_config = self.cloud.get_node_config(node_name)
+        if not node_config:
+            print(f"Error: Cloud node '{node_name}' not found")
+            return 1
+
+        container_name = f"rc-{session_id}"
+
+        if not force:
+            confirm = input(f"Kill cloud session {container_name} on {node_name}? [y/N] ")
+            if confirm.lower() != "y":
+                print("Cancelled.")
+                return 0
+
+        cloud_docker = CloudDockerManager(self.config, node_config)
+        cloud_tmux = CloudTmuxManager(
+            node_config,
+            socket_name=self.config.tmux.socket_name,
+            prefix=self.config.tmux.session_prefix,
+        )
+
+        session_name = cloud_tmux.get_session_name(session_id)
+
+        # Kill tmux session on cloud
+        if cloud_tmux.session_exists(session_name):
+            cloud_tmux.kill_session(session_name)
+            print(f"Killed cloud tmux session: {session_name}")
+
+        # Stop and remove container on cloud
+        cloud_docker.stop_container(container_name)
+        cloud_docker.remove_container(container_name, force=True)
+        print(f"Removed cloud container: {container_name}")
+
+        # Remove from registry
+        self.registry.unregister_session(session_id)
+
+        # Stop 1Password bridge if no more cloud sessions
+        if not self.registry.cloud_sessions():
+            self.cloud.stop_op_bridge()
 
         return 0
 
@@ -375,7 +637,7 @@ class RemoteClaude:
         return 0
 
     def shell(self, session_id: Optional[str] = None) -> int:
-        """Open a shell in a session's container.
+        """Open a shell in a session's container (local or cloud).
 
         Args:
             session_id: Session ID or partial match. If None, shows interactive picker.
@@ -383,6 +645,13 @@ class RemoteClaude:
         Returns:
             Exit code
         """
+        # Check cloud registry first
+        if session_id:
+            cloud_match = self._find_cloud_session(session_id)
+            if cloud_match:
+                full_id, data = cloud_match
+                return self._shell_cloud(full_id, data)
+
         container = self._find_or_select_container(
             session_id, "Select a session for shell:"
         )
@@ -393,6 +662,30 @@ class RemoteClaude:
         print(f"Opening shell in {container.name}...")
         os.execvp("docker", ["docker", "exec", "-it", container.name, "/bin/bash"])
 
+        return 0
+
+    def _shell_cloud(self, session_id: str, session_data: dict) -> int:
+        """Open a shell in a cloud container."""
+        node_name = session_data.get("node")
+        if not node_name or not self.cloud:
+            print("Error: Cloud session has no node assignment")
+            return 1
+
+        node_config = self.cloud.get_node_config(node_name)
+        if not node_config:
+            print(f"Error: Cloud node '{node_name}' not found")
+            return 1
+
+        container_name = f"rc-{session_id}"
+        host = node_config.tailscale_hostname or node_config.tailscale_ip
+
+        print(f"Opening shell in {container_name} on {node_name}...")
+        os.execvp("ssh", [
+            "ssh", "-t",
+            "-o", "StrictHostKeyChecking=no",
+            host,
+            "docker", "exec", "-it", container_name, "/bin/bash",
+        ])
         return 0
 
     def _interactive_select(self, containers: list, prompt: str):
@@ -446,6 +739,14 @@ class RemoteClaude:
 
         return sorted_containers[idx]
 
+    def _find_cloud_session(self, partial_id: str) -> Optional[tuple[str, dict]]:
+        """Find a cloud session by partial ID match.
+
+        Returns:
+            Tuple of (full_session_id, session_data) or None
+        """
+        return self.registry.find_session(partial_id)
+
     def _find_or_select_container(
         self,
         session_id: Optional[str],
@@ -455,6 +756,7 @@ class RemoteClaude:
         """Find a container by ID or show interactive picker if no ID provided.
 
         This is the unified helper for session selection across commands.
+        Includes both local and cloud sessions in the picker.
 
         Args:
             session_id: Session ID or partial match. If None, shows picker.
@@ -466,7 +768,7 @@ class RemoteClaude:
         """
         containers = self.docker.list_containers(all_states=all_states)
 
-        if not containers:
+        if not containers and not self.registry.cloud_sessions():
             print("No active sessions.")
             return None
 
@@ -478,6 +780,14 @@ class RemoteClaude:
         matching = [c for c in containers if session_id in c.name or session_id in c.id]
 
         if not matching:
+            # Check cloud sessions before giving up
+            cloud_match = self._find_cloud_session(session_id)
+            if cloud_match:
+                # Return None here — the caller should check cloud first
+                # This path means the caller didn't check cloud beforehand
+                print(f"Session '{session_id}' is a cloud session. Use the appropriate command.")
+                return None
+
             print(f"Error: No session found matching '{session_id}'")
             return None
 
@@ -1079,20 +1389,29 @@ class RemoteClaude:
         workspace: str,
         attach: bool = True,
         force: bool = False,
+        to: Optional[str] = None,
+        node: Optional[str] = None,
     ) -> int:
-        """Teleport an existing Claude session into the framework.
+        """Teleport a session between local and cloud, or import an existing session.
 
-        Finds any running Claude processes in the workspace, stops them,
-        and starts a new session with --continue to resume the conversation.
+        When --to is specified, moves a running session between local and cloud.
+        Without --to, imports an existing bare Claude session into the framework.
 
         Args:
-            workspace: Path to the workspace
-            attach: Whether to attach to the session after starting
+            workspace: Path to the workspace or session ID
+            attach: Whether to attach after teleporting
             force: Skip confirmation prompts
+            to: Target location ("cloud" or "local")
+            node: Specific cloud node for --to cloud
 
         Returns:
             Exit code
         """
+        # If --to is specified, this is a cloud<->local migration
+        if to:
+            return self._teleport_migrate(workspace, to, attach, force, node)
+
+        # Original behavior: import bare Claude session into framework
         import subprocess
 
         workspace_path = Path(workspace).expanduser().resolve()
@@ -1184,6 +1503,288 @@ class RemoteClaude:
             continue_session=True,
         )
 
+    def _teleport_migrate(
+        self,
+        session_or_workspace: str,
+        to: str,
+        attach: bool = True,
+        force: bool = False,
+        node: Optional[str] = None,
+    ) -> int:
+        """Migrate a session between local and cloud.
+
+        Args:
+            session_or_workspace: Session ID or workspace path
+            to: "cloud" or "local"
+            attach: Whether to attach after migration
+            force: Skip confirmation
+            node: Cloud node name (for --to cloud)
+        """
+        if to not in ("cloud", "local"):
+            print(f"Error: --to must be 'cloud' or 'local', got '{to}'")
+            return 1
+
+        if not self.cloud:
+            print("Error: Cloud not enabled in config")
+            return 1
+
+        if to == "cloud":
+            return self._teleport_to_cloud(session_or_workspace, attach, force, node)
+        else:
+            return self._teleport_to_local(session_or_workspace, attach, force)
+
+    def _teleport_to_cloud(
+        self,
+        session_or_workspace: str,
+        attach: bool,
+        force: bool,
+        node: Optional[str],
+    ) -> int:
+        """Move a local session to the cloud."""
+        # Find the local session
+        container = self._find_or_select_container(
+            session_or_workspace, "Select a session to teleport to cloud:"
+        )
+        if not container:
+            return 1
+
+        extracted_id = container.name.replace("rc-", "")
+        workspace = container.workspace
+        if not workspace:
+            print("Error: Could not determine workspace")
+            return 1
+
+        workspace_path = Path(workspace)
+
+        if not force:
+            confirm = input(f"Teleport {container.name} to cloud? [y/N] ")
+            if confirm.lower() != "y":
+                print("Cancelled.")
+                return 0
+
+        # Kill local session
+        session_name = self.tmux.get_session_name(extracted_id)
+        if self.tmux.session_exists(session_name):
+            self.tmux.kill_session(session_name)
+        self.docker.stop_container(container.name)
+        self.docker.remove_container(container.name, force=True)
+        self.registry.unregister_session(extracted_id)
+        print(f"Stopped local session: {container.name}")
+
+        # Start on cloud with --continue
+        print(f"Starting cloud session...")
+        return self.start(
+            workspace=str(workspace_path),
+            attach=attach,
+            continue_session=True,
+            cloud=True,
+            node=node,
+        )
+
+    def _teleport_to_local(
+        self,
+        session_id: str,
+        attach: bool,
+        force: bool,
+    ) -> int:
+        """Move a cloud session to local."""
+        cloud_match = self._find_cloud_session(session_id)
+        if not cloud_match:
+            print(f"Error: No cloud session found matching '{session_id}'")
+            return 1
+
+        full_id, data = cloud_match
+        node_name = data.get("node")
+        workspace = data.get("workspace")
+        if not node_name or not workspace:
+            print("Error: Cloud session missing node or workspace info")
+            return 1
+
+        workspace_path = Path(workspace)
+        node_config = self.cloud.get_node_config(node_name)
+        if not node_config:
+            print(f"Error: Cloud node '{node_name}' not found")
+            return 1
+
+        if not force:
+            confirm = input(f"Teleport rc-{full_id} from {node_name} to local? [y/N] ")
+            if confirm.lower() != "y":
+                print("Cancelled.")
+                return 0
+
+        # Sync workspace from cloud
+        print("Syncing workspace from cloud...")
+        self.cloud.sync_from_cloud(node_config, workspace_path, full_id)
+
+        # Kill cloud session
+        self._kill_cloud(full_id, data, force=True)
+        print(f"Stopped cloud session on {node_name}")
+
+        # Start locally with --continue
+        print(f"Starting local session...")
+        return self.start(
+            workspace=str(workspace_path),
+            attach=attach,
+            continue_session=True,
+        )
+
+    # ── Cloud subcommands ───────────────────────────────────────
+
+    def cloud_node_add(
+        self,
+        name: Optional[str] = None,
+        server_type: Optional[str] = None,
+        region: Optional[str] = None,
+    ) -> int:
+        """Provision a new cloud node."""
+        if not self.cloud:
+            print("Error: Cloud not enabled in config")
+            return 1
+
+        if not name:
+            # Generate a name
+            existing = [n.name for n in self.config.cloud.nodes]
+            for i in range(1, 100):
+                candidate = f"rc-{i}"
+                if candidate not in existing:
+                    name = candidate
+                    break
+
+        try:
+            node = self.cloud.provision_node(name, server_type, region)
+            print()
+            print(f"Node provisioned:")
+            print(f"  Name: {node.name}")
+            print(f"  Server ID: {node.server_id}")
+            print(f"  Type: {node.server_type}")
+            print(f"  Region: {node.region}")
+            print(f"  Tailscale IP: {node.tailscale_ip or 'pending'}")
+            print(f"  Hostname: {node.tailscale_hostname or 'pending'}")
+            return 0
+        except RuntimeError as e:
+            print(f"Error: {e}")
+            return 1
+
+    def cloud_node_remove(self, name: str, force: bool = False) -> int:
+        """Remove a cloud node."""
+        if not self.cloud:
+            print("Error: Cloud not enabled in config")
+            return 1
+
+        # Check for active sessions
+        sessions = self.registry.sessions_on_node(name)
+        if sessions and not force:
+            print(f"Warning: {len(sessions)} active session(s) on node '{name}':")
+            for sid in sessions:
+                print(f"  rc-{sid}")
+            confirm = input("Destroy anyway? [y/N] ")
+            if confirm.lower() != "y":
+                print("Cancelled.")
+                return 0
+
+        if not force:
+            confirm = input(f"Destroy cloud node '{name}'? This is irreversible. [y/N] ")
+            if confirm.lower() != "y":
+                print("Cancelled.")
+                return 0
+
+        if self.cloud.destroy_node(name):
+            # Clean up sessions from registry
+            for sid in list(sessions.keys()):
+                self.registry.unregister_session(sid)
+            return 0
+        return 1
+
+    def cloud_node_list(self) -> int:
+        """List all cloud nodes."""
+        if not self.cloud:
+            print("Error: Cloud not enabled in config")
+            return 1
+
+        nodes = self.cloud.list_nodes()
+        if not nodes:
+            print("No cloud nodes configured.")
+            print("Run 'rc cloud node add' to provision one.")
+            return 0
+
+        for node in nodes:
+            print(f"{node.name}  {node.server_type}  {node.region}  {node.status}  {node.tailscale_ip or 'no-ip'}  {node.session_count} sessions")
+
+        return 0
+
+    def cloud_status(self) -> int:
+        """Show cloud overview."""
+        if not self.cloud:
+            print("Error: Cloud not enabled in config")
+            return 1
+
+        nodes = self.cloud.list_nodes()
+        cloud_sessions = self.registry.cloud_sessions()
+
+        print(f"Cloud: {'enabled' if self.config.cloud.enabled else 'disabled'}")
+        print(f"Provider: {self.config.cloud.provider}")
+        print(f"Nodes: {len(nodes)}")
+        print(f"Cloud sessions: {len(cloud_sessions)}")
+        print(f"Placement: {self.config.cloud.placement}")
+        print(f"Max sessions/node: {self.config.cloud.max_sessions_per_node}")
+        print()
+
+        if nodes:
+            # Estimate cost (provider-keyed)
+            cost_maps = {
+                "hetzner": {
+                    "cpx11": 4.35, "cpx21": 8.99, "cpx31": 16.49,
+                    "cpx41": 30.49, "cpx51": 61.49,
+                    "cx22": 3.99, "cx32": 7.49, "cx42": 14.49,
+                    "cx52": 28.49,
+                },
+                "digitalocean": {
+                    "s-1vcpu-1gb": 6, "s-1vcpu-2gb": 12,
+                    "s-2vcpu-2gb": 18, "s-2vcpu-4gb": 24,
+                    "s-4vcpu-8gb": 48, "s-8vcpu-16gb": 96,
+                },
+            }
+            cost_map = cost_maps.get(self.config.cloud.provider, {})
+            total_cost = 0.0
+            for node in nodes:
+                cost = cost_map.get(node.server_type, 0)
+                total_cost += cost
+                print(f"  {node.name}: {node.server_type} ({node.region}) - ${cost:.2f}/mo - {node.session_count} sessions - {node.status}")
+
+            if total_cost > 0:
+                print(f"\n  Estimated monthly cost: ${total_cost:.2f}")
+
+        return 0
+
+    def cloud_build(self, node_name: Optional[str] = None) -> int:
+        """Rebuild Docker image on cloud node(s)."""
+        if not self.cloud:
+            print("Error: Cloud not enabled in config")
+            return 1
+
+        nodes = self.config.cloud.nodes
+        if node_name:
+            node = self.cloud.get_node_config(node_name)
+            if not node:
+                print(f"Error: Node '{node_name}' not found")
+                return 1
+            nodes = [node]
+
+        if not nodes:
+            print("No cloud nodes configured.")
+            return 1
+
+        success = True
+        for node in nodes:
+            print(f"\nBuilding on {node.name}...")
+            if not self.cloud.build_on_node(node):
+                print(f"Build failed on {node.name}")
+                success = False
+            else:
+                print(f"Build succeeded on {node.name}")
+
+        return 0 if success else 1
+
 
 def main():
     """Main entry point."""
@@ -1196,10 +1797,15 @@ Examples:
   rc start ~/projects/myapp          Start a new session
   rc start ~/projects/myapp -p "Fix the bug in auth.py"
   rc start ~/projects/myapp -c       Continue previous conversation
+  rc start ~/projects/myapp -C       Start session on cloud
   rc restart myapp                   Restart session (picks up new MCP configs)
-  rc list                            List active sessions
-  rc attach myapp                    Attach to a session
+  rc list                            List active sessions (local + cloud)
+  rc attach myapp                    Attach to a session (auto-detects cloud)
   rc kill myapp                      Kill a session
+  rc teleport myapp --to cloud       Move session to cloud
+  rc teleport myapp --to local       Move session back to local
+  rc cloud node list                 List cloud nodes
+  rc cloud status                    Show cloud overview
         """,
     )
 
@@ -1225,6 +1831,14 @@ Examples:
     start_parser.add_argument(
         "-a", "--account",
         help="Account profile to use (default: from config)"
+    )
+    start_parser.add_argument(
+        "-C", "--cloud", action="store_true",
+        help="Start session on a cloud node"
+    )
+    start_parser.add_argument(
+        "--node",
+        help="Specific cloud node name (default: auto-place)"
     )
 
     # list command
@@ -1299,9 +1913,18 @@ Examples:
     # teleport command
     teleport_parser = subparsers.add_parser(
         "teleport", aliases=["tp"],
-        help="Move existing Claude session into framework"
+        help="Move session between local/cloud or import existing session"
     )
-    teleport_parser.add_argument("workspace", help="Path to workspace with existing session")
+    teleport_parser.add_argument("workspace", help="Path to workspace or session ID")
+    teleport_parser.add_argument(
+        "--to",
+        choices=["cloud", "local"],
+        help="Target location (cloud or local)"
+    )
+    teleport_parser.add_argument(
+        "--node",
+        help="Cloud node for --to cloud"
+    )
     teleport_parser.add_argument(
         "--no-attach", action="store_true",
         help="Don't attach to session after starting"
@@ -1310,6 +1933,32 @@ Examples:
         "-f", "--force", action="store_true",
         help="Skip confirmation prompts"
     )
+
+    # cloud command group
+    cloud_parser = subparsers.add_parser("cloud", help="Cloud infrastructure management")
+    cloud_subparsers = cloud_parser.add_subparsers(dest="cloud_command", help="Cloud commands")
+
+    # cloud node subcommands
+    cloud_node_parser = cloud_subparsers.add_parser("node", help="Manage cloud nodes")
+    cloud_node_subparsers = cloud_node_parser.add_subparsers(dest="node_command", help="Node commands")
+
+    cloud_node_add = cloud_node_subparsers.add_parser("add", help="Provision a new cloud node")
+    cloud_node_add.add_argument("--name", help="Node name (default: auto-generated)")
+    cloud_node_add.add_argument("--type", dest="server_type", help="Server type (default: cpx21)")
+    cloud_node_add.add_argument("--region", help="Region (default: ash)")
+
+    cloud_node_remove = cloud_node_subparsers.add_parser("remove", help="Destroy a cloud node")
+    cloud_node_remove.add_argument("name", help="Node name to destroy")
+    cloud_node_remove.add_argument("-f", "--force", action="store_true", help="Skip confirmation")
+
+    cloud_node_subparsers.add_parser("list", help="List cloud nodes")
+
+    # cloud status
+    cloud_subparsers.add_parser("status", help="Show cloud overview")
+
+    # cloud build
+    cloud_build_parser = cloud_subparsers.add_parser("build", help="Rebuild Docker image on cloud nodes")
+    cloud_build_parser.add_argument("--node", help="Specific node to build on (default: all)")
 
     args = parser.parse_args()
 
@@ -1332,6 +1981,8 @@ Examples:
             continue_session=args.continue_session,
             name=args.name,
             account=args.account,
+            cloud=args.cloud,
+            node=args.node,
         )
     elif args.command in ("list", "ls"):
         return app.list_sessions(all_states=args.all)
@@ -1356,6 +2007,8 @@ Examples:
             workspace=args.workspace,
             attach=not args.no_attach,
             force=args.force,
+            to=args.to,
+            node=getattr(args, "node", None),
         )
     elif args.command == "switch":
         return app.switch(args.session_id, args.account)
@@ -1366,6 +2019,25 @@ Examples:
             return app.account_add(args.name)
         elif args.account_command == "remove":
             return app.account_remove(args.name, force=args.force)
+    elif args.command == "cloud":
+        if args.cloud_command == "node":
+            if args.node_command == "add":
+                return app.cloud_node_add(
+                    name=args.name,
+                    server_type=args.server_type,
+                    region=args.region,
+                )
+            elif args.node_command == "remove":
+                return app.cloud_node_remove(args.name, force=args.force)
+            elif args.node_command == "list" or args.node_command is None:
+                return app.cloud_node_list()
+        elif args.cloud_command == "status":
+            return app.cloud_status()
+        elif args.cloud_command == "build":
+            return app.cloud_build(node_name=args.node)
+        else:
+            cloud_parser.print_help()
+            return 1
 
     return 0
 

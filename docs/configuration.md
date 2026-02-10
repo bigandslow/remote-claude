@@ -144,6 +144,22 @@ Both use the same session files in `~/.claude/projects/`.
 | `blink.host` | Tailscale hostname for Blink deep links |
 | `blink.user` | SSH username for Blink |
 
+### cloud
+
+See [Cloud Setup](cloud-setup.md) for full setup instructions.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Enable cloud infrastructure |
+| `provider` | `digitalocean` | Cloud provider: `digitalocean` or `hetzner` |
+| `api_token_ref` | | 1Password `op://` URI for provider API token |
+| `tailscale_oauth_client_id` | | Tailscale OAuth client ID |
+| `tailscale_oauth_secret_ref` | | 1Password `op://` URI for Tailscale OAuth secret |
+| `default_server_type` | *(provider default)* | Server size (e.g., `s-2vcpu-4gb`, `cpx21`) |
+| `default_region` | *(provider default)* | Region shorthand (e.g., `nyc`, `ash`) |
+| `placement` | `auto` | Session placement: `auto`, `manual`, or `round-robin` |
+| `max_sessions_per_node` | `6` | Max concurrent sessions per VM |
+
 ## Environment Variables
 
 These override config file settings:

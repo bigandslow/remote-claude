@@ -130,9 +130,23 @@ custom_actions:
     command: bash -c 'rc start {worktree_path} --name "$(echo {branch} | sed "s|^[^/]*/||")" --no-attach'
 ```
 
+## Cloud Sessions
+
+Run sessions on DigitalOcean or Hetzner VMs via Tailscale:
+
+```bash
+rc cloud node add --name rc-1     # Provision a VM
+rc start ~/project -C              # Start session on cloud
+rc teleport myapp --to cloud       # Move existing session to cloud
+rc cloud status                    # Show nodes and cost estimate
+```
+
+See [Cloud Setup](docs/cloud-setup.md) for configuration.
+
 ## Documentation
 
 - [Configuration Reference](docs/configuration.md)
+- [Cloud Setup](docs/cloud-setup.md)
 - [Remote Access Setup](docs/remote-access.md)
 - [Notifications](docs/notifications.md)
 - [Security](docs/security.md)

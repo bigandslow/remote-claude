@@ -100,6 +100,34 @@ class AccountsConfig:
 
 
 @dataclass
+class CloudNodeConfig:
+    """Configuration for a provisioned cloud VM."""
+
+    name: str = ""
+    server_id: int = 0
+    server_type: str = ""
+    tailscale_ip: str = ""
+    tailscale_hostname: str = ""
+    region: str = ""
+
+
+@dataclass
+class CloudConfig:
+    """Cloud infrastructure configuration."""
+
+    enabled: bool = False
+    provider: str = "digitalocean"        # "digitalocean" or "hetzner"
+    api_token_ref: str = ""               # op:// URI (generic, works for either provider)
+    tailscale_oauth_client_id: str = ""
+    tailscale_oauth_secret_ref: str = ""  # op:// URI
+    default_server_type: str = ""         # provider-specific, empty = use provider default
+    default_region: str = ""              # provider-specific, empty = use provider default
+    placement: str = "auto"               # auto | manual | round-robin
+    max_sessions_per_node: int = 6
+    nodes: list[CloudNodeConfig] = field(default_factory=list)
+
+
+@dataclass
 class Config:
     """Main configuration container."""
 
@@ -109,6 +137,7 @@ class Config:
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     tmux: TmuxConfig = field(default_factory=TmuxConfig)
     accounts: AccountsConfig = field(default_factory=AccountsConfig)
+    cloud: CloudConfig = field(default_factory=CloudConfig)
 
     def get_credentials_for_account(self, account_name: Optional[str] = None) -> CredentialsConfig:
         """Get effective credentials for an account.
@@ -312,6 +341,46 @@ def load_config() -> Config:
                         profile.claude_gcp = Path(profile_data["claude_gcp"]).expanduser()
                 config.accounts.profiles[name] = profile
 
+    # Cloud config
+    if "cloud" in data:
+        cloud_data = data["cloud"]
+        config.cloud.enabled = cloud_data.get("enabled", config.cloud.enabled)
+        config.cloud.provider = cloud_data.get("provider", config.cloud.provider)
+        # Support both new "api_token_ref" and legacy "hetzner_api_token_ref"
+        config.cloud.api_token_ref = cloud_data.get(
+            "api_token_ref",
+            cloud_data.get("hetzner_api_token_ref", config.cloud.api_token_ref),
+        )
+        config.cloud.tailscale_oauth_client_id = cloud_data.get(
+            "tailscale_oauth_client_id", config.cloud.tailscale_oauth_client_id
+        )
+        config.cloud.tailscale_oauth_secret_ref = cloud_data.get(
+            "tailscale_oauth_secret_ref", config.cloud.tailscale_oauth_secret_ref
+        )
+        config.cloud.default_server_type = cloud_data.get(
+            "default_server_type", config.cloud.default_server_type
+        )
+        config.cloud.default_region = cloud_data.get(
+            "default_region", config.cloud.default_region
+        )
+        config.cloud.placement = cloud_data.get("placement", config.cloud.placement)
+        config.cloud.max_sessions_per_node = cloud_data.get(
+            "max_sessions_per_node", config.cloud.max_sessions_per_node
+        )
+        if "nodes" in cloud_data and isinstance(cloud_data["nodes"], list):
+            config.cloud.nodes = []
+            for node_data in cloud_data["nodes"]:
+                if isinstance(node_data, dict):
+                    node = CloudNodeConfig(
+                        name=node_data.get("name", ""),
+                        server_id=node_data.get("server_id", 0),
+                        server_type=node_data.get("server_type", ""),
+                        tailscale_ip=node_data.get("tailscale_ip", ""),
+                        tailscale_hostname=node_data.get("tailscale_hostname", ""),
+                        region=node_data.get("region", ""),
+                    )
+                    config.cloud.nodes.append(node)
+
     return config
 
 
@@ -376,6 +445,31 @@ def save_config(config: Config) -> None:
             "default": config.accounts.default,
             "on_rate_limit": config.accounts.on_rate_limit,
             "profiles": profiles_data,
+        }
+
+    # Cloud config (only if enabled or has nodes)
+    if config.cloud.enabled or config.cloud.nodes:
+        nodes_data = []
+        for node in config.cloud.nodes:
+            nodes_data.append({
+                "name": node.name,
+                "server_id": node.server_id,
+                "server_type": node.server_type,
+                "tailscale_ip": node.tailscale_ip,
+                "tailscale_hostname": node.tailscale_hostname,
+                "region": node.region,
+            })
+        data["cloud"] = {
+            "enabled": config.cloud.enabled,
+            "provider": config.cloud.provider,
+            "api_token_ref": config.cloud.api_token_ref,
+            "tailscale_oauth_client_id": config.cloud.tailscale_oauth_client_id,
+            "tailscale_oauth_secret_ref": config.cloud.tailscale_oauth_secret_ref,
+            "default_server_type": config.cloud.default_server_type,
+            "default_region": config.cloud.default_region,
+            "placement": config.cloud.placement,
+            "max_sessions_per_node": config.cloud.max_sessions_per_node,
+            "nodes": nodes_data,
         }
 
     with open(config_path, "w") as f:
