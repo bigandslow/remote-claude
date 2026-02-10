@@ -151,7 +151,6 @@ class DigitalOceanProvider(CloudProvider):
             "image": "ubuntu-24-04-x64",
             "region": do_region,
             "user_data": user_data,
-            "tags": ["remote-claude"],
         })
 
         droplet = resp.get("droplet", {})
