@@ -52,6 +52,11 @@ RUN mkdir -p /etc/apt/keyrings \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Temporal CLI
+ARG TEMPORAL_CLI_VERSION=1.6.0
+RUN curl -sL "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz" \
+    | tar xz -C /usr/local/bin temporal
+
 # Install Claude Code CLI globally
 # Pin to specific version for reproducibility
 # Update this version intentionally after testing

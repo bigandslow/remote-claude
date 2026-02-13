@@ -699,6 +699,22 @@ class CloudManager:
                 capture_output=True,
             )
 
+        # GitHub token (used by gh CLI for PR creation)
+        gh_token = self.config.credentials.github_token
+        if gh_token and gh_token.exists():
+            subprocess.run(
+                ["ssh", *SSH_OPTS, host, "mkdir", "-p",
+                 "/home/ubuntu/.config/remote-claude"],
+                check=False,
+                capture_output=True,
+            )
+            subprocess.run(
+                [*RSYNC_SSH, str(gh_token),
+                 f"{host}:/home/ubuntu/.config/remote-claude/github-token"],
+                check=False,
+                capture_output=True,
+            )
+
     def sync_from_cloud(
         self,
         node: CloudNodeConfig,
