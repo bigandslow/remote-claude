@@ -391,14 +391,65 @@ def generate_action_token(session: str, action: str) -> str:
         return hashlib.sha256(data.encode()).hexdigest()[:32]
 
 
-def get_blink_url(session: str, user: str, host: str) -> str:
+def get_blink_url(session: str, user: str, host: str, use_ssh: bool = False) -> str:
     """Generate a Blink Shell deep link URL to attach to a session.
 
-    Format: blinkshell://run?cmd=mosh user@host -- tmux -L remote-claude attach -t session
+    For local sessions, uses mosh for better mobile connectivity.
+    For cloud sessions, uses SSH (mosh requires the local machine).
+
+    Args:
+        session: Tmux session name
+        user: SSH/mosh username
+        host: Hostname or IP
+        use_ssh: Use SSH instead of mosh (for cloud sessions)
     """
-    cmd = f"mosh {user}@{host} -- tmux -L remote-claude attach -t {session}"
+    if use_ssh:
+        cmd = f"ssh -t {user}@{host} tmux -L remote-claude attach -t {session}"
+    else:
+        cmd = f"mosh {user}@{host} -- tmux -L remote-claude attach -t {session}"
     encoded_cmd = urllib.parse.quote(cmd)
     return f"blinkshell://run?cmd={encoded_cmd}"
+
+
+def _is_cloud_session(session: str) -> tuple[bool, Optional[str]]:
+    """Check if a session is running on a cloud node.
+
+    Returns:
+        Tuple of (is_cloud, cloud_hostname). cloud_hostname is None for local sessions.
+    """
+    try:
+        registry_path = Path.home() / ".config" / "remote-claude" / "sessions.json"
+        if not registry_path.exists():
+            return (False, None)
+
+        data = json.loads(registry_path.read_text())
+        sessions = data.get("sessions", {})
+
+        # Try to match the session name to a registered session
+        # Session names are like "rc-myapp-a1b2c3d4", registry keys are "myapp-a1b2c3d4"
+        session_id = session.replace("rc-", "", 1) if session.startswith("rc-") else session
+
+        for sid, sdata in sessions.items():
+            if sid == session_id or session_id in sid:
+                if sdata.get("location") == "cloud":
+                    node_name = sdata.get("node", "")
+                    # Look up node hostname from config
+                    config_path = Path.home() / ".config" / "remote-claude" / "config.yaml"
+                    if config_path.exists():
+                        try:
+                            import yaml
+                            with open(config_path) as f:
+                                config = yaml.safe_load(f) or {}
+                            nodes = config.get("cloud", {}).get("nodes", [])
+                            for node in nodes:
+                                if node.get("name") == node_name:
+                                    return (True, node.get("tailscale_hostname") or node.get("tailscale_ip", ""))
+                        except Exception:
+                            pass
+                    return (True, None)
+        return (False, None)
+    except Exception:
+        return (False, None)
 
 
 def send_interactive_notification(
@@ -481,8 +532,13 @@ def send_interactive_notification(
     if not blink_h:
         blink_h = host  # Fall back to IP
 
+    # Check if this is a cloud session — use SSH instead of mosh
+    is_cloud, cloud_hostname = _is_cloud_session(session)
+    if is_cloud and cloud_hostname:
+        blink_h = cloud_hostname
+
     # Generate Blink URL for main tap action
-    blink_url = get_blink_url(session, user, blink_h)
+    blink_url = get_blink_url(session, user, blink_h, use_ssh=is_cloud)
 
     # Generate signed tokens for each action
     yes_token = generate_action_token(session, "yes")

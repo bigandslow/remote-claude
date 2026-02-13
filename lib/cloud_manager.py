@@ -17,6 +17,24 @@ from typing import Optional
 from .cloud_provider import CloudProvider, get_provider
 from .config import CloudConfig, CloudNodeConfig, Config, save_config
 
+# Default SSH user on cloud VMs (cloud-init creates this user)
+CLOUD_USER = "ubuntu"
+
+# SSH options for cloud node connections: auto-accept new host keys, short timeout.
+SSH_OPTS = [
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "ConnectTimeout=10",
+]
+
+# Rsync uses -e to pass SSH options
+RSYNC_SSH = ["rsync", "-az", "-e", "ssh " + " ".join(SSH_OPTS)]
+
+
+def ssh_host(node: "CloudNodeConfig") -> str:
+    """Return user@host string for SSH to a cloud node."""
+    host = node.tailscale_hostname or node.tailscale_ip
+    return f"{CLOUD_USER}@{host}"
+
 
 @dataclass
 class CloudNode:
@@ -74,11 +92,11 @@ class CloudManager:
 
     # ── Tailscale auth ──────────────────────────────────────────
 
-    def _get_tailscale_auth_key(self) -> str:
-        """Generate a Tailscale auth key via OAuth API.
+    def _get_tailscale_access_token(self) -> str:
+        """Get a Tailscale OAuth access token.
 
-        Uses Tailscale OAuth client credentials to create a one-time
-        auth key for VM provisioning.
+        Uses OAuth client credentials to obtain a short-lived access token
+        for the Tailscale API.
         """
         import urllib.request
         import urllib.error
@@ -87,7 +105,6 @@ class CloudManager:
         if not client_id:
             raise RuntimeError("tailscale_oauth_client_id not configured")
 
-        # Get OAuth secret via op-wrapper
         secret_ref = self.cloud.tailscale_oauth_secret_ref
         if not secret_ref:
             raise RuntimeError("tailscale_oauth_secret_ref not configured")
@@ -102,7 +119,6 @@ class CloudManager:
             raise RuntimeError(f"Failed to read Tailscale OAuth secret: {result.stderr.strip()}")
         client_secret = result.stdout.strip()
 
-        # Get OAuth access token
         token_data = f"client_id={client_id}&client_secret={client_secret}&grant_type=client_credentials"
         req = urllib.request.Request(
             "https://api.tailscale.com/api/v2/oauth/token",
@@ -114,11 +130,17 @@ class CloudManager:
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 oauth_resp = json.loads(resp.read().decode())
-                access_token = oauth_resp["access_token"]
+                return oauth_resp["access_token"]
         except (urllib.error.HTTPError, KeyError) as e:
             raise RuntimeError(f"Failed to get Tailscale OAuth token: {e}")
 
-        # Create auth key using the access token
+    def _get_tailscale_auth_key(self) -> str:
+        """Generate a one-time Tailscale auth key for VM provisioning."""
+        import urllib.request
+        import urllib.error
+
+        access_token = self._get_tailscale_access_token()
+
         auth_key_data = {
             "capabilities": {
                 "devices": {
@@ -149,6 +171,47 @@ class CloudManager:
                 return key_resp["key"]
         except (urllib.error.HTTPError, KeyError) as e:
             raise RuntimeError(f"Failed to create Tailscale auth key: {e}")
+
+    def _remove_tailscale_device(self, hostname: str) -> None:
+        """Remove a device from the tailnet by hostname (best-effort).
+
+        Looks up the device by hostname via the Tailscale API and deletes it.
+        """
+        import urllib.request
+        import urllib.error
+
+        try:
+            access_token = self._get_tailscale_access_token()
+        except RuntimeError:
+            return  # Can't clean up without credentials
+
+        # List devices and find matching hostname
+        req = urllib.request.Request(
+            "https://api.tailscale.com/api/v2/tailnet/-/devices",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                devices = json.loads(resp.read().decode()).get("devices", [])
+        except (urllib.error.HTTPError, KeyError):
+            return
+
+        for device in devices:
+            if device.get("hostname") == hostname:
+                device_id = device.get("id")
+                if not device_id:
+                    continue
+                try:
+                    del_req = urllib.request.Request(
+                        f"https://api.tailscale.com/api/v2/device/{device_id}",
+                        headers={"Authorization": f"Bearer {access_token}"},
+                        method="DELETE",
+                    )
+                    urllib.request.urlopen(del_req, timeout=15)
+                    print(f"Removed '{hostname}' from tailnet")
+                except urllib.error.HTTPError:
+                    pass
 
     # ── Local Tailscale IP ──────────────────────────────────────
 
@@ -221,6 +284,10 @@ class CloudManager:
               - systemctl daemon-reload
               - systemctl enable op-bridge.service
               - systemctl start op-bridge.service
+
+              # Create ubuntu user (exists on Hetzner images, not on DO)
+              - id ubuntu >/dev/null 2>&1 || useradd -m -s /bin/bash ubuntu
+              - usermod -aG docker ubuntu
 
               # Create ubuntu user home structure
               - mkdir -p /home/ubuntu/workspaces
@@ -367,12 +434,8 @@ class CloudManager:
                 print(f"Warning: API error: {e}")
 
         # Remove from Tailscale (best-effort)
-        if node_config.tailscale_hostname:
-            subprocess.run(
-                ["tailscale", "logout", "--accept-risk=lose-ssh"],
-                capture_output=True,
-                check=False,
-            )
+        if node_config.name:
+            self._remove_tailscale_device(node_config.name)
 
         # Remove from config
         self.cloud.nodes = [n for n in self.cloud.nodes if n.name != name]
@@ -403,8 +466,7 @@ class CloudManager:
             status = "unknown"
             if nc.tailscale_hostname:
                 result = subprocess.run(
-                    ["ssh", "-o", "ConnectTimeout=3", "-o", "StrictHostKeyChecking=no",
-                     nc.tailscale_hostname, "echo", "ok"],
+                    ["ssh", *SSH_OPTS, nc.tailscale_hostname, "echo", "ok"],
                     capture_output=True,
                     text=True,
                     check=False,
@@ -522,8 +584,8 @@ class CloudManager:
         Returns:
             True if sync succeeded
         """
-        host = node.tailscale_hostname or node.tailscale_ip
-        if not host:
+        host = ssh_host(node)
+        if not node.tailscale_hostname and not node.tailscale_ip:
             print("Error: Node has no Tailscale address")
             return False
 
@@ -531,7 +593,7 @@ class CloudManager:
 
         # Create remote directory
         subprocess.run(
-            ["ssh", host, "mkdir", "-p", remote_workspace],
+            ["ssh", *SSH_OPTS, host, "mkdir", "-p", remote_workspace],
             check=False,
             capture_output=True,
         )
@@ -540,7 +602,7 @@ class CloudManager:
         print(f"Syncing workspace to {host}...")
         result = subprocess.run(
             [
-                "rsync", "-az", "--delete",
+                *RSYNC_SSH, "--delete",
                 "--filter=:- .gitignore",
                 f"{workspace_path}/",
                 f"{host}:{remote_workspace}/",
@@ -560,14 +622,14 @@ class CloudManager:
         if local_project_dir.exists():
             remote_project_dir = f"/home/ubuntu/.claude/projects/{encoded_path}"
             subprocess.run(
-                ["ssh", host, "mkdir", "-p", remote_project_dir],
+                ["ssh", *SSH_OPTS, host, "mkdir", "-p", remote_project_dir],
                 check=False,
                 capture_output=True,
             )
             print(f"Syncing project state...")
             subprocess.run(
                 [
-                    "rsync", "-az", "--delete",
+                    *RSYNC_SSH, "--delete",
                     f"{local_project_dir}/",
                     f"{host}:{remote_project_dir}/",
                 ],
@@ -581,13 +643,13 @@ class CloudManager:
 
     def _sync_credentials_to_cloud(self, node: CloudNodeConfig) -> None:
         """Sync credentials to cloud node (non-destructive, one-time items)."""
-        host = node.tailscale_hostname or node.tailscale_ip
+        host = ssh_host(node)
 
         # Anthropic credentials
         anthropic_dir = self.config.credentials.anthropic
         if anthropic_dir.exists():
             subprocess.run(
-                ["rsync", "-az", f"{anthropic_dir}/", f"{host}:/home/ubuntu/.anthropic/"],
+                [*RSYNC_SSH, f"{anthropic_dir}/", f"{host}:/home/ubuntu/.anthropic/"],
                 check=False,
                 capture_output=True,
             )
@@ -596,7 +658,7 @@ class CloudManager:
         cred_file = self.config.credentials.claude / ".credentials.json"
         if cred_file.exists():
             subprocess.run(
-                ["rsync", "-az", str(cred_file), f"{host}:/home/ubuntu/.claude/.credentials.json"],
+                [*RSYNC_SSH, str(cred_file), f"{host}:/home/ubuntu/.claude/.credentials.json"],
                 check=False,
                 capture_output=True,
             )
@@ -605,7 +667,7 @@ class CloudManager:
         setup_token = self.config.credentials.claude / ".setup-token"
         if setup_token.exists():
             subprocess.run(
-                ["rsync", "-az", str(setup_token), f"{host}:/home/ubuntu/.claude/.setup-token"],
+                [*RSYNC_SSH, str(setup_token), f"{host}:/home/ubuntu/.claude/.setup-token"],
                 check=False,
                 capture_output=True,
             )
@@ -614,7 +676,7 @@ class CloudManager:
         settings_file = self.config.credentials.claude / "settings.json"
         if settings_file.exists():
             subprocess.run(
-                ["rsync", "-az", str(settings_file), f"{host}:/home/ubuntu/.claude/settings.json"],
+                [*RSYNC_SSH, str(settings_file), f"{host}:/home/ubuntu/.claude/settings.json"],
                 check=False,
                 capture_output=True,
             )
@@ -623,7 +685,7 @@ class CloudManager:
         git_config = self.config.credentials.git
         if git_config.exists():
             subprocess.run(
-                ["rsync", "-az", str(git_config), f"{host}:/home/ubuntu/.gitconfig"],
+                [*RSYNC_SSH, str(git_config), f"{host}:/home/ubuntu/.gitconfig"],
                 check=False,
                 capture_output=True,
             )
@@ -632,7 +694,7 @@ class CloudManager:
         claude_json = Path.home() / ".claude.json"
         if claude_json.exists():
             subprocess.run(
-                ["rsync", "-az", str(claude_json), f"{host}:/home/ubuntu/.claude.json"],
+                [*RSYNC_SSH, str(claude_json), f"{host}:/home/ubuntu/.claude.json"],
                 check=False,
                 capture_output=True,
             )
@@ -655,8 +717,8 @@ class CloudManager:
         Returns:
             True if sync succeeded
         """
-        host = node.tailscale_hostname or node.tailscale_ip
-        if not host:
+        host = ssh_host(node)
+        if not node.tailscale_hostname and not node.tailscale_ip:
             print("Error: Node has no Tailscale address")
             return False
 
@@ -666,7 +728,7 @@ class CloudManager:
         print(f"Syncing workspace from {host}...")
         result = subprocess.run(
             [
-                "rsync", "-az", "--delete",
+                *RSYNC_SSH, "--delete",
                 "--filter=:- .gitignore",
                 f"{host}:{remote_workspace}/",
                 f"{workspace_path}/",
@@ -688,7 +750,7 @@ class CloudManager:
         print(f"Syncing project state back...")
         subprocess.run(
             [
-                "rsync", "-az", "--delete",
+                *RSYNC_SSH, "--delete",
                 f"{host}:{remote_project_dir}/",
                 f"{local_project_dir}/",
             ],
@@ -787,8 +849,8 @@ class CloudManager:
         Returns:
             True if build succeeded
         """
-        host = node.tailscale_hostname or node.tailscale_ip
-        if not host:
+        host = ssh_host(node)
+        if not node.tailscale_hostname and not node.tailscale_ip:
             print(f"Error: Node '{node.name}' has no Tailscale address")
             return False
 
@@ -803,7 +865,7 @@ class CloudManager:
             (f"{hooks_dir}/", f"{host}:/home/ubuntu/remote-claude/hooks/"),
         ]:
             result = subprocess.run(
-                ["rsync", "-az", "--delete", src, dst],
+                [*RSYNC_SSH, "--delete", src, dst],
                 check=False,
             )
             if result.returncode != 0:
@@ -811,7 +873,7 @@ class CloudManager:
 
         print(f"Building Docker image on {node.name}...")
         result = subprocess.run(
-            ["ssh", host, "docker", "build", "-t", "remote-claude:latest",
+            ["ssh", *SSH_OPTS, host, "docker", "build", "-t", "remote-claude:latest",
              "/home/ubuntu/remote-claude/docker/"],
             check=False,
         )

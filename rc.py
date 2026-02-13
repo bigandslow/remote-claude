@@ -677,12 +677,13 @@ class RemoteClaude:
             return 1
 
         container_name = f"rc-{session_id}"
-        host = node_config.tailscale_hostname or node_config.tailscale_ip
 
+        from lib.cloud_manager import SSH_OPTS, ssh_host
+        host = ssh_host(node_config)
         print(f"Opening shell in {container_name} on {node_name}...")
         os.execvp("ssh", [
             "ssh", "-t",
-            "-o", "StrictHostKeyChecking=no",
+            *SSH_OPTS,
             host,
             "docker", "exec", "-it", container_name, "/bin/bash",
         ])
