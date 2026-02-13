@@ -859,6 +859,14 @@ class CloudManager:
         docker_dir = repo_dir / "docker"
         hooks_dir = repo_dir / "hooks"
 
+        # Ensure remote directory structure exists (git clone may have failed)
+        subprocess.run(
+            ["ssh", *SSH_OPTS, host, "mkdir", "-p",
+             "/home/ubuntu/remote-claude/docker", "/home/ubuntu/remote-claude/hooks"],
+            check=False,
+            capture_output=True,
+        )
+
         print(f"Syncing build context to {node.name}...")
         for src, dst in [
             (f"{docker_dir}/", f"{host}:/home/ubuntu/remote-claude/docker/"),
