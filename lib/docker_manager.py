@@ -12,20 +12,17 @@ from typing import Optional
 from .config import Config, ProjectConfig
 
 
-def _get_worktree_gitdir(workspace_path: Path) -> Optional[Path]:
-    """Check if a workspace is a git worktree and get the parent .git directory.
+def _get_worktree_info(workspace_path: Path) -> Optional[tuple[Path, str]]:
+    """Check if a workspace is a git worktree and get commondir + worktree name.
 
     Git worktrees have a .git file (not directory) containing:
         gitdir: /path/to/main/repo/.git/worktrees/<name>
-
-    For containers to use git in a worktree, we need to mount the parent
-    repo's .git directory.
 
     Args:
         workspace_path: Path to the workspace directory
 
     Returns:
-        Path to the parent repo's .git directory if this is a worktree, None otherwise
+        (parent_gitdir, worktree_name) if this is a worktree, None otherwise
     """
     git_path = workspace_path / ".git"
 
@@ -48,7 +45,7 @@ def _get_worktree_gitdir(workspace_path: Path) -> Optional[Path]:
         # The parent .git dir is two levels up from .git/worktrees/<name>
         # e.g., /repo/.git/worktrees/branch -> /repo/.git
         if gitdir_path.parent.name == "worktrees":
-            return gitdir_path.parent.parent
+            return (gitdir_path.parent.parent, gitdir_path.name)
 
         return None
     except (OSError, ValueError):
@@ -410,13 +407,46 @@ class DockerManager:
             f"{workspace_path}:/workspace",
         ]
 
-        # If workspace is a git worktree, also mount the parent repo's .git directory
-        # This allows git commands to work inside the container
-        worktree_gitdir = _get_worktree_gitdir(workspace_path)
-        if worktree_gitdir and worktree_gitdir.exists():
-            # Mount the parent .git at the same path so the gitdir reference works
-            # Must be read-write so git can create lock files in worktrees/
-            args.extend(["-v", f"{worktree_gitdir}:{worktree_gitdir}"])
+        # If workspace is a git worktree, mount the commondir with isolation:
+        # - Base commondir read-only at /commondir/.git (protects HEAD, config, other worktrees)
+        # - Read-write overlays for objects/refs/logs (needed for commits)
+        # - Worktree state copied to tmpfs by entrypoint (host state read-only at staging path)
+        # - .git file overlaid with container-internal gitdir pointer (protects host .git file)
+        worktree_info = _get_worktree_info(workspace_path)
+        if worktree_info:
+            gitdir, wt_name = worktree_info
+            wt_dir = gitdir / "worktrees" / wt_name
+
+            # Base: entire commondir read-only at container-internal path
+            args.extend(["-v", f"{gitdir}:/commondir/.git:ro"])
+
+            # Writable overlays for git operations (commits, branch updates, reflogs)
+            for subdir in ["objects", "refs", "logs"]:
+                sub = gitdir / subdir
+                if sub.exists():
+                    args.extend(["-v", f"{sub}:/commondir/.git/{subdir}"])
+
+            # This worktree's state (HEAD, index, MERGE_HEAD, etc.)
+            # Mount read-only at staging path; entrypoint copies to a tmpfs
+            # so writes (gitdir/commondir rewrites) don't leak back to host.
+            if wt_dir.exists():
+                args.extend(["-v", f"{wt_dir}:/tmp/rc-worktree-host:ro"])
+                args.extend(["--tmpfs", f"/commondir/.git/worktrees/{wt_name}:mode=1777"])
+
+            # Overlay the workspace .git file with container-internal gitdir pointer.
+            # Without this, writes to /workspace/.git (a bind mount) would corrupt
+            # the host worktree's .git file.
+            # Note: NOT registered for atexit cleanup because Docker Desktop for Mac
+            # requires the host file to exist for the bind mount's lifetime.
+            git_file = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".git", delete=False, prefix="rc-wt-"
+            )
+            git_file.write(f"gitdir: /commondir/.git/worktrees/{wt_name}\n")
+            git_file.close()
+            args.extend(["-v", f"{git_file.name}:/workspace/.git:ro"])
+
+            # Pass worktree name so entrypoint can set up worktree state
+            args.extend(["-e", f"RC_WORKTREE_NAME={wt_name}"])
 
         # Mount credentials read-only (resolved for account)
         # Priority: deploy keys > bot account > personal credentials

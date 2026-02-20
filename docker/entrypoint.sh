@@ -4,6 +4,36 @@
 
 set -e
 
+# Set up worktree .git linkage for container-internal paths
+# When a workspace is a git worktree, docker_manager mounts the commondir at
+# /commondir/.git with isolation (read-only base, read-write overlays).
+# This function rewrites the .git file and worktree metadata to use
+# container-internal paths instead of host paths.
+setup_worktree() {
+    if [ -z "$RC_WORKTREE_NAME" ]; then
+        return 0
+    fi
+
+    local wt_gitdir="/commondir/.git/worktrees/$RC_WORKTREE_NAME"
+
+    # Copy host worktree state (HEAD, index, etc.) from read-only staging
+    # mount into the writable tmpfs. This isolates container writes from host.
+    if [ -d /tmp/rc-worktree-host ]; then
+        cp -r /tmp/rc-worktree-host/. "$wt_gitdir/"
+    fi
+
+    # Fix commondir to use absolute container path instead of relative
+    # (relative "../.." would resolve wrong with the new mount layout)
+    echo "/commondir/.git" > "$wt_gitdir/commondir"
+
+    # Update gitdir backlink to container-internal worktree path
+    # (The .git file at /workspace/.git is already set via a read-only
+    # bind mount from docker_manager, so we don't write to it here.)
+    echo "/workspace/.git" > "$wt_gitdir/gitdir"
+}
+
+setup_worktree
+
 # Fix SSH config paths for container environment
 # The SSH config is generated on the host with host paths, but we need container paths
 fix_ssh_config_paths() {
@@ -151,6 +181,14 @@ elif [ -f /home/claude/.gitconfig ]; then
     export GIT_CONFIG_GLOBAL=/home/claude/.gitconfig
     echo 'export GIT_CONFIG_GLOBAL=/home/claude/.gitconfig' >> /home/claude/.bashrc
     echo 'export GIT_CONFIG_GLOBAL=/home/claude/.gitconfig' >> /home/claude/.profile
+fi
+
+# For worktree containers, the workspace and commondir are owned by the host
+# UID, not the container claude user. Mark them as safe for git.
+# This must run after git config setup above so GIT_CONFIG_GLOBAL is writable.
+if [ -n "$RC_WORKTREE_NAME" ]; then
+    git config --global --add safe.directory /workspace
+    git config --global --add safe.directory /commondir/.git
 fi
 
 # Configure safety protections
