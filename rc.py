@@ -167,6 +167,12 @@ class RemoteClaude:
                 return 1
             print("Image built successfully.")
 
+        # Warn if configured image is missing (onboarding not completed)
+        if not self.docker.configured_image_exists():
+            print(f"Error: Configured image '{self.docker.CONFIGURED_IMAGE}' not found.")
+            print("Run 'rc setup' to complete initial onboarding first.")
+            return 1
+
         # Generate session ID
         session_id = self.generate_session_id(workspace_path, name)
         session_name = self.tmux.get_session_name(session_id)
