@@ -4,6 +4,14 @@
 
 set -e
 
+# Ensure ~/.local/bin is on PATH for all processes (including git hook subprocesses).
+# pip installs tools here (mypy, ruff, etc.) and they must be reachable by
+# non-login shells like those spawned by subprocess.run() in pre-commit hooks.
+export PATH="/home/claude/.local/bin:$PATH"
+echo 'export PATH="/home/claude/.local/bin:$PATH"' >> /home/claude/.bashrc
+echo 'export PATH="/home/claude/.local/bin:$PATH"' >> /home/claude/.profile
+echo 'PATH="/home/claude/.local/bin:$PATH"' | sudo tee /etc/environment > /dev/null
+
 # Set up worktree .git linkage for container-internal paths
 # When a workspace is a git worktree, docker_manager mounts the commondir at
 # /commondir/.git with isolation (read-only base, read-write overlays).
