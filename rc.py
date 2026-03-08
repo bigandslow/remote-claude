@@ -642,6 +642,88 @@ class RemoteClaude:
 
         return 0
 
+    def send(self, session_id: str, text: str, wait_for: Optional[str] = None,
+             timeout: int = 30) -> int:
+        """Send text to a session's tmux pane.
+
+        Args:
+            session_id: Session ID or partial match.
+            text: Text/command to send.
+            wait_for: Optional pattern to wait for in pane output.
+            timeout: Timeout in seconds when using wait_for.
+
+        Returns:
+            0 on success (or pattern matched), 1 on error/timeout.
+        """
+        # Check cloud registry first
+        cloud_match = self._find_cloud_session(session_id)
+        if cloud_match:
+            full_id, data = cloud_match
+            return self._send_cloud(full_id, data, text, wait_for, timeout)
+
+        container = self._find_or_select_container(
+            session_id, "Select a session to send to:"
+        )
+        if not container:
+            return 1
+
+        extracted_id = container.name.replace("rc-", "")
+        session_name = self.tmux.get_session_name(extracted_id)
+
+        if not self.tmux.session_exists(session_name):
+            print(f"Error: Tmux session not found for {extracted_id}")
+            return 1
+
+        if not self.tmux.send_keys(session_name, text):
+            print(f"Error: Failed to send keys to {session_name}")
+            return 1
+
+        if not wait_for:
+            return 0
+
+        return self._wait_for_pattern(self.tmux, session_name, wait_for, timeout)
+
+    def _send_cloud(self, session_id: str, session_data: dict, text: str,
+                    wait_for: Optional[str], timeout: int) -> int:
+        """Send text to a cloud session's tmux pane."""
+        node_name = session_data.get("node")
+        if not node_name or not self.cloud:
+            print("Error: Cloud session has no node assignment")
+            return 1
+
+        node_config = self.cloud.get_node_config(node_name)
+        if not node_config:
+            print(f"Error: Cloud node '{node_name}' not found")
+            return 1
+
+        cloud_tmux = CloudTmuxManager(
+            node_config,
+            socket_name=self.config.tmux.socket_name,
+            prefix=self.config.tmux.session_prefix,
+        )
+        session_name = cloud_tmux.get_session_name(session_id)
+
+        if not cloud_tmux.send_keys(session_name, text):
+            print(f"Error: Failed to send keys to {session_name}")
+            return 1
+
+        if not wait_for:
+            return 0
+
+        return self._wait_for_pattern(cloud_tmux, session_name, wait_for, timeout)
+
+    def _wait_for_pattern(self, tmux: TmuxManager, session_name: str,
+                          pattern: str, timeout: int) -> int:
+        """Poll capture_pane until pattern appears or timeout."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            output = tmux.capture_pane(session_name)
+            if output and pattern in output:
+                return 0
+            time.sleep(1)
+        print(f"Timeout: pattern '{pattern}' not found after {timeout}s")
+        return 1
+
     def shell(self, session_id: Optional[str] = None) -> int:
         """Open a shell in a session's container (local or cloud).
 
@@ -1873,6 +1955,13 @@ Examples:
     shell_parser = subparsers.add_parser("shell", aliases=["sh"], help="Open shell in a session's container")
     shell_parser.add_argument("session_id", nargs="?", default=None, help="Session ID (partial match OK). If omitted, shows picker.")
 
+    # send command
+    send_parser = subparsers.add_parser("send", help="Send command to a session")
+    send_parser.add_argument("session_id", help="Session ID (partial match OK)")
+    send_parser.add_argument("text", help="Text/command to send")
+    send_parser.add_argument("--wait-for", help="Pattern to wait for in output")
+    send_parser.add_argument("--timeout", type=int, default=30, help="Timeout in seconds (default: 30)")
+
     # status command
     subparsers.add_parser("status", help="Show detailed status")
 
@@ -2001,6 +2090,9 @@ Examples:
         return app.restart(args.session_id)
     elif args.command in ("shell", "sh"):
         return app.shell(args.session_id)
+    elif args.command == "send":
+        return app.send(args.session_id, args.text,
+                        wait_for=args.wait_for, timeout=args.timeout)
     elif args.command == "status":
         return app.status()
     elif args.command == "logs":
