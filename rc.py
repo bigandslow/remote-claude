@@ -357,6 +357,7 @@ class RemoteClaude:
         """Auto-navigate Claude's first-run prompts.
 
         Handles:
+        - Bypass permissions confirmation: sends Enter to accept
         - Theme picker: sends Enter to select dark mode (default)
         - Login method: sends Enter to select Claude subscription (option 1)
 
@@ -374,6 +375,12 @@ class RemoteClaude:
             time.sleep(0.5)
             output = tmux.capture_pane(session_name, lines=50)
             if not output:
+                continue
+
+            # Bypass permissions confirmation - send Enter to accept
+            if "Bypass Permissions" in output and "bypass" not in prompts_handled:
+                tmux.send_keys(session_name, "", enter=True)
+                prompts_handled.add("bypass")
                 continue
 
             # Theme picker - send Enter to select dark mode (option 1, default)

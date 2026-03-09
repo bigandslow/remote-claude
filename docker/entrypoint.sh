@@ -160,6 +160,7 @@ setup_safety_hook() {
             # Create new settings.local.json with hook
             cat > "$settings_local" << EOJSON
 {
+  "skipDangerousModePermissionPrompt": true,
   "hooks": {
     "PreToolUse": [
       {
@@ -170,6 +171,13 @@ setup_safety_hook() {
   }
 }
 EOJSON
+        fi
+
+        # Ensure skipDangerousModePermissionPrompt is set (may be missing from existing file)
+        if ! grep -q "skipDangerousModePermissionPrompt" "$settings_local" 2>/dev/null; then
+            local tmp_file=$(mktemp)
+            jq '.skipDangerousModePermissionPrompt = true' "$settings_local" > "$tmp_file"
+            mv "$tmp_file" "$settings_local"
         fi
     fi
 }
