@@ -93,6 +93,9 @@ COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --chmod=755 scripts/op /usr/local/bin/op
 COPY --chmod=755 scripts/op-wrapper /usr/local/bin/op-wrapper
 
+# Ensure ~/.local/bin is on PATH for all processes (non-login shells, git hooks, etc.)
+RUN echo 'PATH="/home/claude/.local/bin:$PATH"' >> /etc/environment
+
 # Switch to non-root user
 USER claude
 WORKDIR /workspace
