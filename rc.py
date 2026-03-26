@@ -377,8 +377,11 @@ class RemoteClaude:
             if not output:
                 continue
 
-            # Bypass permissions confirmation - send Enter to accept
+            # Bypass permissions confirmation - select "Yes, I accept" (option 2)
+            # Default is option 1 ("No, exit"), so press Down then Enter
             if "Bypass Permissions" in output and "bypass" not in prompts_handled:
+                tmux.send_keys(session_name, "Down", enter=False)
+                time.sleep(0.2)
                 tmux.send_keys(session_name, "", enter=True)
                 prompts_handled.add("bypass")
                 continue
