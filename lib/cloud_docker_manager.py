@@ -149,24 +149,10 @@ class CloudDockerManager(DockerManager):
         # Mount hooks from cloud-side repo
         args.extend(["-v", "/home/ubuntu/remote-claude/hooks:/home/claude/.rc-hooks:ro"])
 
-        # Project setup script (upload to remote and mount)
+        # Pass project setup commands via environment variable
         if project_config and project_config.setup_commands:
-            setup_content = "#!/bin/bash\nset -e\n"
-            for cmd in project_config.setup_commands:
-                setup_content += f"{cmd}\n"
-
-            # Write setup script to remote
-            remote_setup = f"/tmp/rc-setup-{session_id}.sh"
-            subprocess.run(
-                ["ssh", *SSH_OPTS, self._ssh_host, "bash", "-c",
-                 f"cat > {remote_setup} && chmod 755 {remote_setup}"],
-                input=setup_content,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            args.extend(["-v", f"{remote_setup}:/home/claude/.rc-setup.sh:ro"])
-            args.extend(["-e", "RC_HAS_SETUP_SCRIPT=1"])
+            setup_script = "#!/bin/bash\nset -e\n" + "\n".join(project_config.setup_commands) + "\n"
+            args.extend(["-e", f"RC_SETUP_SCRIPT={setup_script}"])
 
         # Network mode — cloud containers use bridge (no proxy needed)
         # The cloud VM itself provides the network boundary

@@ -615,19 +615,12 @@ class DockerManager:
         if hooks_dir.exists():
             args.extend(["-v", f"{hooks_dir}:/home/claude/.rc-hooks:ro"])
 
-        # Mount project setup script if setup_commands are configured
+        # Pass project setup commands via environment variable.
+        # Previously used a temp file bind mount, but atexit cleanup would
+        # delete it before the container's entrypoint could execute it.
         if project_config and project_config.setup_commands:
-            setup_script = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".sh", delete=False, prefix="rc-setup-"
-            )
-            setup_script.write("#!/bin/bash\nset -e\n")
-            for cmd in project_config.setup_commands:
-                setup_script.write(f"{cmd}\n")
-            setup_script.close()
-            os.chmod(setup_script.name, 0o755)
-            _TEMP_FILES_TO_CLEANUP.add(setup_script.name)
-            args.extend(["-v", f"{setup_script.name}:/home/claude/.rc-setup.sh:ro"])
-            args.extend(["-e", "RC_HAS_SETUP_SCRIPT=1"])
+            setup_script = "#!/bin/bash\nset -e\n" + "\n".join(project_config.setup_commands) + "\n"
+            args.extend(["-e", f"RC_SETUP_SCRIPT={setup_script}"])
 
         # Network mode
         proxy_container_id = None

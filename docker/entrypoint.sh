@@ -220,10 +220,10 @@ fi
 # Configure safety protections
 setup_safety_hook
 
-# Run project setup commands if mounted
-if [ -n "$RC_HAS_SETUP_SCRIPT" ] && [ -f /home/claude/.rc-setup.sh ]; then
+# Run project setup commands passed via environment variable
+if [ -n "$RC_SETUP_SCRIPT" ]; then
     echo "Running project setup commands..."
-    /home/claude/.rc-setup.sh
+    bash -c "$RC_SETUP_SCRIPT"
 fi
 
 # For setup mode, run once and exit (no loop)
