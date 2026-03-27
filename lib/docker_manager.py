@@ -523,10 +523,12 @@ class DockerManager:
             if plans_dir.exists():
                 args.extend(["-v", f"{plans_dir}:/home/claude/.claude/plans"])
 
-            # Plugins (read-write)
+            # Plugins - mount read-only at staging path; entrypoint copies with
+            # fixed paths to the real location so host file isn't modified
             plugins_dir = claude_dir / "plugins"
             if plugins_dir.exists():
-                args.extend(["-v", f"{plugins_dir}:/home/claude/.claude/plugins"])
+                args.extend(["-v", f"{plugins_dir}:/home/claude/.claude/plugins-host:ro"])
+                args.extend(["-e", f"RC_HOST_CLAUDE_DIR={claude_dir}"])
 
         # Claude state file (~/.claude.json) - contains oauthAccount for login bypass
         claude_json = Path.home() / ".claude.json"

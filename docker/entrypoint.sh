@@ -206,6 +206,17 @@ if [ -n "$RC_WORKTREE_NAME" ]; then
     git config --global --add safe.directory /commondir/.git
 fi
 
+# Fix plugin paths: host plugins are mounted read-only at plugins-host/.
+# Copy to the real plugins/ location with host paths rewritten to container paths.
+if [ -d /home/claude/.claude/plugins-host ]; then
+    mkdir -p /home/claude/.claude/plugins
+    cp -rT /home/claude/.claude/plugins-host /home/claude/.claude/plugins
+    if [ -n "$RC_HOST_CLAUDE_DIR" ] && [ -f /home/claude/.claude/plugins/installed_plugins.json ]; then
+        sed -i "s|$RC_HOST_CLAUDE_DIR|/home/claude/.claude|g" \
+            /home/claude/.claude/plugins/installed_plugins.json
+    fi
+fi
+
 # Configure safety protections
 setup_safety_hook
 
