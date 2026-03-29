@@ -211,9 +211,10 @@ fi
 if [ -d /home/claude/.claude/plugins-host ]; then
     mkdir -p /home/claude/.claude/plugins
     cp -rT /home/claude/.claude/plugins-host /home/claude/.claude/plugins
-    if [ -n "$RC_HOST_CLAUDE_DIR" ] && [ -f /home/claude/.claude/plugins/installed_plugins.json ]; then
-        sed -i "s|$RC_HOST_CLAUDE_DIR|/home/claude/.claude|g" \
-            /home/claude/.claude/plugins/installed_plugins.json
+    if [ -n "$RC_HOST_CLAUDE_DIR" ]; then
+        # Rewrite host paths in all plugin JSON files
+        find /home/claude/.claude/plugins -name "*.json" -exec \
+            sed -i "s|$RC_HOST_CLAUDE_DIR|/home/claude/.claude|g" {} +
     fi
 fi
 
