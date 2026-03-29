@@ -235,6 +235,9 @@ class DockerManager:
     def commit_configured_image(self, container_name: str) -> bool:
         """Commit a container as the pre-configured image.
 
+        Clears RC_SETUP_MODE so the committed image runs in normal
+        loop mode instead of single-run setup mode.
+
         Args:
             container_name: Name of container to commit
 
@@ -242,7 +245,8 @@ class DockerManager:
             True if commit succeeded
         """
         result = self._run_docker(
-            ["commit", container_name, self.CONFIGURED_IMAGE],
+            ["commit", "--change", "ENV RC_SETUP_MODE=",
+             container_name, self.CONFIGURED_IMAGE],
             check=False,
             capture=True,
         )

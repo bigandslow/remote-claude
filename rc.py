@@ -1006,12 +1006,20 @@ class RemoteClaude:
             self.tmux.kill_session(setup_session)
 
     def _setup_navigate_prompts(self, session_name: str) -> int:
-        """Poll tmux pane and navigate setup prompts."""
+        """Poll tmux pane and navigate setup prompts.
+
+        Auto-handles all prompts except OAuth login. When the OAuth URL
+        appears, opens the browser and waits for the user to send the
+        authorization code via: rc send rc-setup "<code>"
+
+        The method then continues navigating remaining prompts until
+        reaching the main REPL, sends /exit, and commits the image.
+        """
         import re
 
         prompts_handled = set()
-        # 120 iterations * 2s = 4 minutes max for full onboarding
-        for _ in range(120):
+        # 180 iterations * 2s = 6 minutes max (extra time for OAuth wait)
+        for _ in range(180):
             time.sleep(2)
             output = self.tmux.capture_pane(session_name, lines=50)
             if not output:
@@ -1040,25 +1048,34 @@ class RemoteClaude:
                 prompts_handled.add("login")
                 continue
 
-            # OAuth URL - open browser and ask user for code
+            # OAuth URL - open browser and wait for code via rc send
             if "oauth/authorize" in output and "oauth" not in prompts_handled:
                 url_match = re.search(r'(https://claude\.ai/oauth/authorize\S+)', output.replace('\n', ''))
                 if url_match:
                     url = url_match.group(1)
-                    print(f"  Opening browser for authentication...")
+                    print("  Opening browser for authentication...")
                     subprocess.run(["open", url], check=False)
-                    code = input("  Paste the authorization code: ")
-                    self.tmux.send_keys(session_name, code, enter=True)
+                    print()
+                    print("  Waiting for authorization code. Send it with:")
+                    print('    rc send rc-setup "<paste-code-here>"')
+                    print()
                     prompts_handled.add("oauth")
                 continue
 
-            # "Login successful" / "Press Enter to continue"
+            # Login successful - the code was sent via rc send
+            if "Login successful" in output and "login_done" not in prompts_handled:
+                print("  Login successful.")
+                prompts_handled.add("login_done")
+                # Don't continue — let "Press Enter" handler pick it up
+                continue
+
+            # "Press Enter to continue" (may appear multiple times)
             if "Press Enter to continue" in output and "enter_continue" not in prompts_handled:
                 print("  Continuing...")
                 self.tmux.send_keys(session_name, "", enter=True)
                 prompts_handled.add("enter_continue")
-                # Reset so we can handle multiple "Press Enter" prompts
                 time.sleep(1)
+                # Reset so we can handle multiple "Press Enter" prompts
                 prompts_handled.discard("enter_continue")
                 continue
 
