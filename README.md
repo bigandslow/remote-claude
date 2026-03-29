@@ -36,10 +36,25 @@ rc a [session]                      # Attach to session
 rc kill [session]                   # Kill session
 rc restart [session]                # Restart Claude (picks up new MCP configs)
 rc shell [session]                  # Open bash in container
+rc send <session> "<text>"          # Send command to session (non-interactive)
 rc logs [session] [-f]              # View container logs
 ```
 
 Partial name matching works: `rc a myapp` matches `myapp-abc123`.
+
+## Sending Commands Non-Interactively
+
+`rc send` sends keystrokes to a running session without attaching:
+
+```bash
+# Fire-and-forget
+rc send myapp "echo hello"
+
+# Wait for output pattern (returns 0 on match, 1 on timeout)
+rc send myapp "run-tests" --wait-for "PASS" --timeout 60
+```
+
+Works with both local and cloud sessions. Useful for scripted orchestration and batch workflows.
 
 ## Setup Command
 
@@ -48,6 +63,22 @@ Partial name matching works: `rc a myapp` matches `myapp-abc123`.
 - Copies auth tokens so Claude works immediately
 - Skips onboarding prompts (theme selection, login, etc.)
 - Only needs to run once (or after `rc build --refresh`)
+
+### Headless Setup
+
+`rc setup --headless` runs setup non-interactively. It auto-navigates all prompts via tmux and only requires you to complete OAuth login:
+
+```bash
+rc setup --headless
+# → Opens browser for OAuth
+# → Prints: rc send rc-setup "<paste-code-here>"
+
+# In another terminal (or via an agent), send the auth code:
+rc send rc-setup "YOUR_AUTH_CODE_HERE"
+# → Setup completes automatically and commits the image
+```
+
+This is useful when running setup from a script or agent that can't provide interactive terminal input.
 
 ## Multi-Account Support
 
