@@ -135,6 +135,33 @@ tmux -L remote-claude attach -t rc-<session-id>
 tmux -L remote-claude list-clients
 ```
 
+## Setup Issues
+
+### `rc setup --headless` times out waiting for OAuth
+
+The browser should open automatically. Send the authorization code from another terminal:
+
+```bash
+rc send rc-setup "YOUR_AUTH_CODE_HERE"
+```
+
+### Containers prompt for login after `rc build --refresh`
+
+`--refresh` rebuilds the configured image from scratch, wiping saved credentials. Run `rc setup` (or `rc setup --headless`) afterwards to re-authenticate.
+
+### Plugins show "Unknown skill" in containers
+
+Plugins require host path rewriting to work inside containers. If plugins aren't recognized:
+
+1. Verify the plugin is installed on the host: `claude plugin list`
+2. Rebuild the image: `rc build --refresh` then `rc setup`
+
+The entrypoint copies plugins from a read-only staging mount and rewrites host paths (e.g., `/Users/you/.claude/...`) to container paths (`/home/claude/.claude/...`) in all JSON files.
+
+### Bypass permissions prompt blocks container startup
+
+The entrypoint sets `skipDangerousModePermissionPrompt: true` in `settings.local.json`. If it still appears, `_auto_select_theme()` auto-dismisses it by selecting "Yes, I accept". If neither works, ensure `rc build --refresh` was run to pick up the latest entrypoint.
+
 ## Logs
 
 ### View container logs

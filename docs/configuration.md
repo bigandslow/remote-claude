@@ -95,7 +95,7 @@ Only specific directories from `~/.claude` are mounted to avoid container change
 | `~/.claude/CLAUDE.md` | `/home/claude/.claude/CLAUDE.md` | read-write | User instructions |
 | `~/.claude/todos/` | `/home/claude/.claude/todos/` | read-write | Todo items |
 | `~/.claude/plans/` | `/home/claude/.claude/plans/` | read-write | Saved plans |
-| `~/.claude/plugins/` | `/home/claude/.claude/plugins/` | read-write | Installed plugins |
+| `~/.claude/plugins/` | `/home/claude/.claude/plugins-host/` | read-only | Installed plugins (copied to `plugins/` at startup with host paths rewritten) |
 | `~/.claude.json` | `/home/claude/.claude.json` | read-write | OAuth account info |
 
 ### Credentials
