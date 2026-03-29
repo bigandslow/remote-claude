@@ -898,11 +898,15 @@ class RemoteClaude:
 
         return matching[0]
 
-    def setup(self) -> int:
-        """Run interactive setup to create a pre-configured image.
+    def setup(self, headless: bool = False) -> int:
+        """Run setup to create a pre-configured image.
 
-        Starts a temporary container, lets user complete onboarding (theme,
-        login, etc.), then commits the container as remote-claude:configured.
+        In interactive mode (default), attaches to the container for manual
+        onboarding. In headless mode, auto-navigates prompts and only asks
+        the user to paste the OAuth code.
+
+        Args:
+            headless: If True, auto-navigate prompts instead of attaching.
 
         Returns:
             Exit code
@@ -922,17 +926,23 @@ class RemoteClaude:
 
         # Check if configured image already exists
         if self.docker.configured_image_exists():
-            confirm = input(
-                f"Configured image already exists. Recreate? [y/N] "
-            )
-            if confirm.lower() != "y":
-                print("Cancelled.")
-                return 0
-            # Remove old configured image
-            subprocess.run(
-                ["docker", "rmi", self.docker.CONFIGURED_IMAGE],
-                capture_output=True,
-            )
+            if headless:
+                # Auto-confirm in headless mode
+                subprocess.run(
+                    ["docker", "rmi", self.docker.CONFIGURED_IMAGE],
+                    capture_output=True,
+                )
+            else:
+                confirm = input(
+                    f"Configured image already exists. Recreate? [y/N] "
+                )
+                if confirm.lower() != "y":
+                    print("Cancelled.")
+                    return 0
+                subprocess.run(
+                    ["docker", "rmi", self.docker.CONFIGURED_IMAGE],
+                    capture_output=True,
+                )
 
         # Clean up any existing setup container
         self.docker.remove_setup_container()
@@ -944,6 +954,10 @@ class RemoteClaude:
             return 1
 
         print(f"Container started: {container_id}")
+
+        if headless:
+            return self._setup_headless()
+
         print()
         print("=" * 60)
         print("Complete the onboarding process:")
@@ -963,28 +977,128 @@ class RemoteClaude:
         except KeyboardInterrupt:
             print("\nSetup interrupted.")
 
-        # Ask if we should save the configured image
-        print()
-        confirm = input("Save this configuration as the base image? [Y/n] ")
-        if confirm.lower() == "n":
-            print("Discarding setup container...")
-            self.docker.remove_setup_container()
-            return 0
+        return self._setup_commit()
 
-        # Commit the container
+    def _setup_headless(self) -> int:
+        """Auto-navigate setup prompts, only asking user for OAuth code.
+
+        Creates a host-side tmux session wrapping 'docker attach' to the
+        setup container, then polls/sends keys to navigate onboarding.
+
+        Returns:
+            Exit code
+        """
+        import re
+
+        setup_session = "rc-setup"
+        container = self.docker.SETUP_CONTAINER
+
+        # Create a host tmux session wrapping docker attach
+        self.tmux.create_session(
+            setup_session,
+            f"docker attach {container}",
+        )
+
+        try:
+            return self._setup_navigate_prompts(setup_session)
+        finally:
+            # Kill the tmux session
+            self.tmux.kill_session(setup_session)
+
+    def _setup_navigate_prompts(self, session_name: str) -> int:
+        """Poll tmux pane and navigate setup prompts."""
+        import re
+
+        prompts_handled = set()
+        # 120 iterations * 2s = 4 minutes max for full onboarding
+        for _ in range(120):
+            time.sleep(2)
+            output = self.tmux.capture_pane(session_name, lines=50)
+            if not output:
+                continue
+
+            # Bypass permissions confirmation - select "Yes, I accept"
+            if "Bypass Permissions" in output and "bypass" not in prompts_handled:
+                print("  Accepting bypass permissions...")
+                self.tmux.send_keys(session_name, "Down", enter=False)
+                time.sleep(0.3)
+                self.tmux.send_keys(session_name, "", enter=True)
+                prompts_handled.add("bypass")
+                continue
+
+            # Theme picker - select dark mode (option 1)
+            if "Choose the text style" in output and "theme" not in prompts_handled:
+                print("  Selecting dark mode theme...")
+                self.tmux.send_keys(session_name, "", enter=True)
+                prompts_handled.add("theme")
+                continue
+
+            # Login method - select Claude subscription (option 1)
+            if "Select login method" in output and "login" not in prompts_handled:
+                print("  Selecting Claude subscription login...")
+                self.tmux.send_keys(session_name, "", enter=True)
+                prompts_handled.add("login")
+                continue
+
+            # OAuth URL - open browser and ask user for code
+            if "oauth/authorize" in output and "oauth" not in prompts_handled:
+                url_match = re.search(r'(https://claude\.ai/oauth/authorize\S+)', output.replace('\n', ''))
+                if url_match:
+                    url = url_match.group(1)
+                    print(f"  Opening browser for authentication...")
+                    subprocess.run(["open", url], check=False)
+                    code = input("  Paste the authorization code: ")
+                    self.tmux.send_keys(session_name, code, enter=True)
+                    prompts_handled.add("oauth")
+                continue
+
+            # "Login successful" / "Press Enter to continue"
+            if "Press Enter to continue" in output and "enter_continue" not in prompts_handled:
+                print("  Continuing...")
+                self.tmux.send_keys(session_name, "", enter=True)
+                prompts_handled.add("enter_continue")
+                # Reset so we can handle multiple "Press Enter" prompts
+                time.sleep(1)
+                prompts_handled.discard("enter_continue")
+                continue
+
+            # Security notes - press Enter
+            if "Security notes" in output and "security" not in prompts_handled:
+                print("  Accepting security notes...")
+                self.tmux.send_keys(session_name, "", enter=True)
+                prompts_handled.add("security")
+                continue
+
+            # Trust folder - select "Yes, I trust this folder"
+            if "trust this folder" in output and "trust" not in prompts_handled:
+                print("  Trusting workspace folder...")
+                self.tmux.send_keys(session_name, "", enter=True)
+                prompts_handled.add("trust")
+                continue
+
+            # Main prompt reached - send /exit and commit
+            if (">" in output or "Welcome back" in output) and "trust" in prompts_handled:
+                print("  Setup complete, sending /exit...")
+                time.sleep(2)
+                self.tmux.send_keys(session_name, "/exit", enter=True)
+                time.sleep(3)
+                return self._setup_commit()
+
+        print("Error: Setup timed out waiting for prompts")
+        self.docker.remove_setup_container()
+        return 1
+
+    def _setup_commit(self) -> int:
+        """Commit the setup container as the configured image."""
         print(f"Saving configured image as {self.docker.CONFIGURED_IMAGE}...")
         if self.docker.commit_configured_image(self.docker.SETUP_CONTAINER):
             print("Success! Future sessions will use this pre-configured image.")
-            print()
-            print("To start a session: rc start /path/to/workspace")
         else:
             print("Error: Failed to commit configured image")
             self.docker.remove_setup_container()
             return 1
 
-        # Clean up setup container
         self.docker.remove_setup_container()
-
         return 0
 
     def switch(self, session_id: str, account: str) -> int:
@@ -2014,7 +2128,8 @@ Examples:
     )
 
     # setup command
-    subparsers.add_parser("setup", help="Run interactive setup to create pre-configured image")
+    setup_parser = subparsers.add_parser("setup", help="Run interactive setup to create pre-configured image")
+    setup_parser.add_argument("--headless", action="store_true", help="Auto-navigate prompts, only ask for OAuth code")
 
     # teleport command
     teleport_parser = subparsers.add_parser(
@@ -2110,7 +2225,7 @@ Examples:
     elif args.command == "build":
         return app.build(refresh=args.refresh)
     elif args.command == "setup":
-        return app.setup()
+        return app.setup(headless=args.headless)
     elif args.command in ("teleport", "tp"):
         return app.teleport(
             workspace=args.workspace,
