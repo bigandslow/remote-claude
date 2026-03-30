@@ -56,6 +56,17 @@ rc send myapp "run-tests" --wait-for "PASS" --timeout 60
 
 Works with both local and cloud sessions. Useful for scripted orchestration and batch workflows.
 
+## Ralph Loop (Autonomous Iteration)
+
+Run a prompt in a loop using the [ralph-loop plugin](https://github.com/anthropics/claude-plugins-official):
+
+```bash
+# Use fully qualified syntax (plugin:command)
+rc send myapp '/ralph-loop:ralph-loop "Refactor the cache layer" --max-iterations 10'
+```
+
+Note: `/ralph-loop "args"` alone won't work — Claude Code requires the `:ralph-loop` qualifier when the plugin and command share the same name.
+
 ## Setup Command
 
 `rc setup` creates a pre-configured Docker image with your credentials baked in:
