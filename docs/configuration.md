@@ -105,6 +105,34 @@ Only specific directories from `~/.claude` are mounted to avoid container change
 | `~/.gitconfig` | `/home/claude/.gitconfig` | read-only | Git configuration |
 | `~/.ssh/` | `/home/claude/.ssh/` | read-only | SSH keys |
 
+## Project Configuration
+
+Each workspace requires a `.rc/project.yaml` file before `rc start` will run. Create one with:
+
+```bash
+rc init ~/projects/myapp
+```
+
+### `.rc/project.yaml`
+
+```yaml
+# Commands to run when the container starts
+setup_commands:
+  - pip install --break-system-packages mypy ruff
+
+# Private repos this project needs access to (org/repo format)
+deploy_keys:
+  - myorg/myrepo
+```
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `setup_commands` | list | Shell commands run by entrypoint before Claude starts |
+| `deploy_keys` | list | Repos (org/repo) to configure git URL rewriting for |
+| `features` | dict | Feature flags (project-specific) |
+
+Deploy keys are scoped per-project. Only repos listed in `deploy_keys` get git insteadOf rules configured. This prevents credential leakage across unrelated projects.
+
 ## Session Persistence
 
 Sessions are stored in `~/.claude/projects/<encoded-path>/`. The path is encoded by replacing `/`, `.`, and `_` with `-`.

@@ -189,6 +189,7 @@ class ProjectConfig:
     """Per-project configuration loaded from .rc/project.yaml."""
 
     setup_commands: list[str] = field(default_factory=list)
+    deploy_keys: list[str] = field(default_factory=list)
     features: dict[str, bool] = field(default_factory=dict)
 
     def is_feature_enabled(self, name: str) -> bool:
@@ -220,6 +221,9 @@ def load_project_config(workspace_path: Path) -> ProjectConfig:
 
     if "setup_commands" in data and isinstance(data["setup_commands"], list):
         config.setup_commands = [str(cmd) for cmd in data["setup_commands"]]
+
+    if "deploy_keys" in data and isinstance(data["deploy_keys"], list):
+        config.deploy_keys = [str(repo) for repo in data["deploy_keys"]]
 
     if "features" in data and isinstance(data["features"], dict):
         config.features = {str(k): bool(v) for k, v in data["features"].items()}

@@ -187,6 +187,13 @@ class RemoteClaude:
         if continue_session:
             env_vars["RC_CONTINUE"] = "1"
 
+        # Require project initialization
+        rc_dir = workspace_path / ".rc"
+        if not (rc_dir / "project.yaml").exists():
+            print(f"Error: No .rc/project.yaml found in {workspace_path}")
+            print("Run 'rc init <workspace>' to initialize this project first.")
+            return 1
+
         # Load per-project configuration
         project_config = load_project_config(workspace_path)
 
@@ -258,6 +265,13 @@ class RemoteClaude:
         if not self.cloud:
             print("Error: Cloud not enabled in config")
             print("Set cloud.enabled: true in ~/.config/remote-claude/config.yaml")
+            return 1
+
+        # Require project initialization
+        rc_dir = workspace_path / ".rc"
+        if not (rc_dir / "project.yaml").exists():
+            print(f"Error: No .rc/project.yaml found in {workspace_path}")
+            print("Run 'rc init <workspace>' to initialize this project first.")
             return 1
 
         # Select node
@@ -897,6 +911,51 @@ class RemoteClaude:
             return None
 
         return matching[0]
+
+    def init(self, workspace: str) -> int:
+        """Initialize a workspace for use with rc.
+
+        Creates .rc/project.yaml with default configuration.
+
+        Args:
+            workspace: Path to the workspace directory
+
+        Returns:
+            Exit code
+        """
+        workspace_path = Path(workspace).expanduser().resolve()
+
+        if not workspace_path.exists():
+            print(f"Error: Path does not exist: {workspace_path}")
+            return 1
+
+        if not workspace_path.is_dir():
+            print(f"Error: Not a directory: {workspace_path}")
+            return 1
+
+        rc_dir = workspace_path / ".rc"
+        config_file = rc_dir / "project.yaml"
+
+        if config_file.exists():
+            print(f"Already initialized: {config_file}")
+            return 0
+
+        rc_dir.mkdir(exist_ok=True)
+        config_file.write_text(
+            "# rc project configuration\n"
+            "# See: docs/configuration.md\n"
+            "\n"
+            "# Commands to run when the container starts\n"
+            "setup_commands: []\n"
+            "\n"
+            "# Private repos this project needs access to (org/repo format)\n"
+            "# Requires deploy keys: rc account deploy-key add <repo> <key-path>\n"
+            "deploy_keys: []\n"
+        )
+
+        print(f"Initialized: {config_file}")
+        print("Edit this file to configure setup commands and deploy keys.")
+        return 0
 
     def setup(self, headless: bool = False) -> int:
         """Run setup to create a pre-configured image.
@@ -2144,6 +2203,10 @@ Examples:
         help="Rebuild base image and update configured image (preserves onboarding state)"
     )
 
+    # init command
+    init_parser = subparsers.add_parser("init", help="Initialize a workspace for use with rc")
+    init_parser.add_argument("workspace", nargs="?", default=".", help="Path to workspace (default: current directory)")
+
     # setup command
     setup_parser = subparsers.add_parser("setup", help="Run interactive setup to create pre-configured image")
     setup_parser.add_argument("--headless", action="store_true", help="Auto-navigate prompts, only ask for OAuth code")
@@ -2241,6 +2304,8 @@ Examples:
         return app.logs(args.session_id, tail=args.tail, follow=args.follow)
     elif args.command == "build":
         return app.build(refresh=args.refresh)
+    elif args.command == "init":
+        return app.init(args.workspace)
     elif args.command == "setup":
         return app.setup(headless=args.headless)
     elif args.command in ("teleport", "tp"):

@@ -15,6 +15,9 @@ cd remote-claude
 # One-time setup (configures auth, skips onboarding prompts)
 ./rc.py setup
 
+# Initialize a project
+./rc.py init ~/projects/myapp
+
 # Start a session
 ./rc.py start ~/projects/myapp
 ```
@@ -30,6 +33,7 @@ alias rc="$HOME/GitHub/remote-claude/rc.py"
 All session commands support interactive selection when called without arguments:
 
 ```bash
+rc init <workspace>                 # Initialize project (required before start)
 rc start <workspace> [--name NAME]  # Start new session
 rc ls                               # List sessions
 rc a [session]                      # Attach to session
@@ -116,6 +120,15 @@ ssh-keygen -t ed25519 -f ~/.ssh/deploy-myrepo -N ""
 # Register with remote-claude
 rc account deploy-key add myorg/myrepo ~/.ssh/deploy-myrepo
 ```
+
+Then add the repo to your project's `.rc/project.yaml`:
+
+```yaml
+deploy_keys:
+  - myorg/myrepo
+```
+
+Deploy keys are scoped per-project — only repos listed in `deploy_keys` are configured in that project's containers.
 
 ## Mobile Access
 

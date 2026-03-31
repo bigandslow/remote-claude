@@ -76,14 +76,21 @@ setup_deploy_keys() {
         return 0
     fi
 
+    # Skip if no repos specified (projects must opt in via .rc/project.yaml)
+    if [ -z "$RC_DEPLOY_KEY_REPOS" ]; then
+        return 0
+    fi
+
     # Fix SSH config paths first
     fix_ssh_config_paths
 
     echo "Configuring git for deploy keys..."
 
-    # Parse registry and set up git insteadOf rules for each repo
+    # Parse registry and set up git insteadOf rules for matching repos.
+    # RC_DEPLOY_KEY_REPOS (comma-separated) scopes which repos get configured.
     python3 << 'EOF'
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -91,9 +98,18 @@ registry_file = Path("/home/claude/.deploy-keys-registry.json")
 if not registry_file.exists():
     exit(0)
 
+# Only configure repos listed in RC_DEPLOY_KEY_REPOS
+allowed = os.environ.get("RC_DEPLOY_KEY_REPOS", "")
+if not allowed:
+    exit(0)
+allowed_repos = set(r.strip() for r in allowed.split(",") if r.strip())
+
 registry = json.loads(registry_file.read_text())
 
 for repo, info in registry.get("repos", {}).items():
+    if repo not in allowed_repos:
+        continue
+
     alias = info["alias"]
     org, repo_name = repo.split("/", 1)
 

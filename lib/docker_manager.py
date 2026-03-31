@@ -626,6 +626,10 @@ class DockerManager:
             setup_script = "#!/bin/bash\nset -e\n" + "\n".join(project_config.setup_commands) + "\n"
             args.extend(["-e", f"RC_SETUP_SCRIPT={setup_script}"])
 
+        # Scope deploy keys to project-specific repos (comma-separated)
+        if project_config and project_config.deploy_keys:
+            args.extend(["-e", f"RC_DEPLOY_KEY_REPOS={','.join(project_config.deploy_keys)}"])
+
         # Network mode
         proxy_container_id = None
         network_name = None
