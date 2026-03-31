@@ -801,6 +801,51 @@ class RemoteClaude:
         ])
         return 0
 
+    def port(self, session_id: str, container_port: int,
+             local_port: Optional[int] = None) -> int:
+        """Forward a container port to localhost via socat + docker exec.
+
+        Args:
+            session_id: Session ID or partial match.
+            container_port: Port inside the container to forward.
+            local_port: Local port to listen on (default: same as container_port).
+
+        Returns:
+            Exit code
+        """
+        local_port = local_port or container_port
+
+        container = self._find_or_select_container(
+            session_id, "Select a session for port forwarding:"
+        )
+        if not container:
+            return 1
+
+        # Verify socat is available on host
+        socat_path = subprocess.run(
+            ["which", "socat"], capture_output=True, text=True
+        ).stdout.strip()
+        if not socat_path:
+            print("Error: socat is required for port forwarding but not found on PATH")
+            return 1
+
+        print(f"Forwarding localhost:{local_port} → {container.name}:{container_port}")
+        print("Press Ctrl+C to stop")
+
+        try:
+            subprocess.run(
+                [
+                    socat_path,
+                    f"TCP-LISTEN:{local_port},fork,reuseaddr",
+                    f"EXEC:docker exec -i {container.name} nc localhost {container_port}",
+                ],
+                check=False,
+            )
+        except KeyboardInterrupt:
+            print("\nPort forwarding stopped.")
+
+        return 0
+
     def _interactive_select(self, containers: list, prompt: str):
         """Show interactive session picker.
 
@@ -855,10 +900,15 @@ class RemoteClaude:
     def _find_cloud_session(self, partial_id: str) -> Optional[tuple[str, dict]]:
         """Find a cloud session by partial ID match.
 
+        Only returns sessions with location=cloud, not local sessions.
+
         Returns:
             Tuple of (full_session_id, session_data) or None
         """
-        return self.registry.find_session(partial_id)
+        result = self.registry.find_session(partial_id)
+        if result and result[1].get("location") == "cloud":
+            return result
+        return None
 
     def _find_or_select_container(
         self,
@@ -2162,6 +2212,12 @@ Examples:
     send_parser.add_argument("--wait-for", help="Pattern to wait for in output")
     send_parser.add_argument("--timeout", type=int, default=30, help="Timeout in seconds (default: 30)")
 
+    # port command
+    port_parser = subparsers.add_parser("port", help="Forward a container port to localhost")
+    port_parser.add_argument("session_id", help="Session ID (partial match OK)")
+    port_parser.add_argument("container_port", type=int, help="Port inside the container")
+    port_parser.add_argument("--local-port", type=int, default=None, help="Local port (default: same as container port)")
+
     # status command
     subparsers.add_parser("status", help="Show detailed status")
 
@@ -2298,6 +2354,9 @@ Examples:
     elif args.command == "send":
         return app.send(args.session_id, args.text,
                         wait_for=args.wait_for, timeout=args.timeout)
+    elif args.command == "port":
+        return app.port(args.session_id, args.container_port,
+                        local_port=args.local_port)
     elif args.command == "status":
         return app.status()
     elif args.command == "logs":
