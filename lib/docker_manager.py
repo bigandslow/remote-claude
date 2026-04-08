@@ -411,24 +411,19 @@ class DockerManager:
             f"{workspace_path}:/workspace",
         ]
 
-        # If workspace is a git worktree, mount the commondir with isolation:
-        # - Base commondir read-only at /commondir/.git (protects HEAD, config, other worktrees)
-        # - Read-write overlays for objects/refs/logs (needed for commits)
-        # - Worktree state copied to tmpfs by entrypoint (host state read-only at staging path)
-        # - .git file overlaid with container-internal gitdir pointer (protects host .git file)
+        # If workspace is a git worktree, mount the commondir read-write so git
+        # can write objects, update refs, and append reflogs.
+        # Note: Docker Desktop VirtioFS does not honor rw submounts under a ro
+        # parent bind mount, so we mount the whole commondir rw.
+        # The worktree-specific state dir is shadowed by a tmpfs so that the
+        # entrypoint's path rewrites (gitdir/commondir) don't leak back to host.
         worktree_info = _get_worktree_info(workspace_path)
         if worktree_info:
             gitdir, wt_name = worktree_info
             wt_dir = gitdir / "worktrees" / wt_name
 
-            # Base: entire commondir read-only at container-internal path
-            args.extend(["-v", f"{gitdir}:/commondir/.git:ro"])
-
-            # Writable overlays for git operations (commits, branch updates, reflogs)
-            for subdir in ["objects", "refs", "logs"]:
-                sub = gitdir / subdir
-                if sub.exists():
-                    args.extend(["-v", f"{sub}:/commondir/.git/{subdir}"])
+            # Full commondir read-write (needed for commits, branch updates, reflogs)
+            args.extend(["-v", f"{gitdir}:/commondir/.git"])
 
             # This worktree's state (HEAD, index, MERGE_HEAD, etc.)
             # Mount read-only at staging path; entrypoint copies to a tmpfs

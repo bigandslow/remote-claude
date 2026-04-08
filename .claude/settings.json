@@ -1,0 +1,6 @@
+{
+  "allowedTools": [
+    "Bash(python3 /Users/cstrahorn/GitHub/remote-claude/rc.py build*)",
+    "Bash(python3 /Users/cstrahorn/GitHub/remote-claude/rc.py setup*)"
+  ]
+}

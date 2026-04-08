@@ -33,10 +33,17 @@ setup_worktree() {
     # (relative "../.." would resolve wrong with the new mount layout)
     echo "/commondir/.git" > "$wt_gitdir/commondir"
 
-    # Update gitdir backlink to container-internal worktree path
-    # (The .git file at /workspace/.git is already set via a read-only
-    # bind mount from docker_manager, so we don't write to it here.)
-    echo "/workspace/.git" > "$wt_gitdir/gitdir"
+    # Update gitdir backlink: the worktree expects to find its own dir via this
+    echo "$wt_gitdir" > "$wt_gitdir/gitdir"
+
+    # /workspace/.git is a file pointing to a host path that doesn't exist in
+    # the container. Docker Desktop for Mac does not allow shadowing a file
+    # inside a directory bind mount with a separate file bind mount, so the
+    # host path leaks through. Set GIT_DIR explicitly so git ignores /workspace/.git
+    # and uses the container-internal worktree dir directly.
+    export GIT_DIR="$wt_gitdir"
+    echo "export GIT_DIR=\"$wt_gitdir\"" >> /home/claude/.bashrc
+    echo "export GIT_DIR=\"$wt_gitdir\"" >> /home/claude/.profile
 }
 
 setup_worktree
@@ -233,6 +240,27 @@ if [ -d /home/claude/.claude/plugins-host ]; then
             sed -i "s|$RC_HOST_CLAUDE_DIR|/home/claude/.claude|g" {} +
     fi
 fi
+
+# Validate git setup and warn if broken
+validate_git() {
+    local status
+    status=$(git -C /workspace status 2>&1)
+    if [ $? -ne 0 ]; then
+        echo ""
+        echo "WARNING: git is not working in /workspace"
+        echo "  Error: $status"
+        if [ -n "$RC_WORKTREE_NAME" ]; then
+            echo "  GIT_DIR=$GIT_DIR"
+            echo "  commondir: $(cat "$GIT_DIR/commondir" 2>/dev/null || echo '(missing)')"
+            echo "  HEAD: $(cat "$GIT_DIR/HEAD" 2>/dev/null || echo '(missing)')"
+        else
+            echo "  /workspace/.git: $(cat /workspace/.git 2>/dev/null || ls -la /workspace/.git 2>/dev/null || echo '(missing)')"
+        fi
+        echo ""
+    fi
+}
+
+validate_git
 
 # Configure safety protections
 setup_safety_hook

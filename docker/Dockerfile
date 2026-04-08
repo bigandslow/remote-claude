@@ -31,6 +31,14 @@ RUN apt-get update && apt-get install -y \
     vim-tiny \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Python 3.13 via deadsnakes PPA (Ubuntu 24.04 ships 3.12)
+RUN apt-get update \
+    && apt-get install -y software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y python3.13 python3.13-venv python3.13-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install pre-commit via pip (apt version has PATH issues in container)
 RUN pip install --break-system-packages pre-commit
 
