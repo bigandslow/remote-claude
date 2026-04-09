@@ -79,8 +79,9 @@ Paths to credential files/directories to mount into containers.
 
 | Host Path | Container Path | Mode | Purpose |
 |-----------|----------------|------|---------|
-| `<workspace>` | `/workspace` | read-write | Your project files |
-| `<parent-repo>/.git` | same path | read-write | Git worktree support (if applicable) |
+| `<workspace>` | `/workspace` | read-write | Your project files (non-worktree) |
+
+For **git worktrees**, the workspace and git commondir are mounted at their exact host paths inside the container (e.g. `/Users/you/.cache/workspaces/my-branch` and `/Users/you/GitHub/myrepo/.git`). This avoids any path translation so git works natively. Claude's working directory is set to the host workspace path.
 
 ### Claude Config (Selective)
 

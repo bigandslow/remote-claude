@@ -11,43 +11,6 @@ export PATH="/home/claude/.local/bin:$PATH"
 echo 'export PATH="/home/claude/.local/bin:$PATH"' >> /home/claude/.bashrc
 echo 'export PATH="/home/claude/.local/bin:$PATH"' >> /home/claude/.profile
 
-# Set up worktree .git linkage for container-internal paths
-# When a workspace is a git worktree, docker_manager mounts the commondir at
-# /commondir/.git with isolation (read-only base, read-write overlays).
-# This function rewrites the .git file and worktree metadata to use
-# container-internal paths instead of host paths.
-setup_worktree() {
-    if [ -z "$RC_WORKTREE_NAME" ]; then
-        return 0
-    fi
-
-    local wt_gitdir="/commondir/.git/worktrees/$RC_WORKTREE_NAME"
-
-    # Copy host worktree state (HEAD, index, etc.) from read-only staging
-    # mount into the writable tmpfs. This isolates container writes from host.
-    if [ -d /tmp/rc-worktree-host ]; then
-        cp -r /tmp/rc-worktree-host/. "$wt_gitdir/"
-    fi
-
-    # Fix commondir to use absolute container path instead of relative
-    # (relative "../.." would resolve wrong with the new mount layout)
-    echo "/commondir/.git" > "$wt_gitdir/commondir"
-
-    # Update gitdir backlink: the worktree expects to find its own dir via this
-    echo "$wt_gitdir" > "$wt_gitdir/gitdir"
-
-    # /workspace/.git is a file pointing to a host path that doesn't exist in
-    # the container. Docker Desktop for Mac does not allow shadowing a file
-    # inside a directory bind mount with a separate file bind mount, so the
-    # host path leaks through. Set GIT_DIR explicitly so git ignores /workspace/.git
-    # and uses the container-internal worktree dir directly.
-    export GIT_DIR="$wt_gitdir"
-    echo "export GIT_DIR=\"$wt_gitdir\"" >> /home/claude/.bashrc
-    echo "export GIT_DIR=\"$wt_gitdir\"" >> /home/claude/.profile
-}
-
-setup_worktree
-
 # Fix SSH config paths for container environment
 # The SSH config is generated on the host with host paths, but we need container paths
 fix_ssh_config_paths() {
@@ -221,12 +184,14 @@ elif [ -f /home/claude/.gitconfig ]; then
     echo 'export GIT_CONFIG_GLOBAL=/home/claude/.gitconfig' >> /home/claude/.profile
 fi
 
-# For worktree containers, the workspace and commondir are owned by the host
-# UID, not the container claude user. Mark them as safe for git.
-# This must run after git config setup above so GIT_CONFIG_GLOBAL is writable.
-if [ -n "$RC_WORKTREE_NAME" ]; then
-    git config --global --add safe.directory /workspace
-    git config --global --add safe.directory /commondir/.git
+# For worktree containers, the workspace and git dir are owned by the host UID.
+# Mark them as safe for git. Paths are the actual host paths, mounted identically.
+# Must run after git config setup above so GIT_CONFIG_GLOBAL is writable.
+if [ -n "$RC_WORKTREE_WORKSPACE" ]; then
+    git config --global --add safe.directory "$RC_WORKTREE_WORKSPACE"
+fi
+if [ -n "$RC_WORKTREE_GITDIR" ]; then
+    git config --global --add safe.directory "$RC_WORKTREE_GITDIR"
 fi
 
 # Fix plugin paths: host plugins are mounted read-only at plugins-host/.
@@ -243,19 +208,14 @@ fi
 
 # Validate git setup and warn if broken
 validate_git() {
+    local check_dir="${RC_WORKTREE_WORKSPACE:-/workspace}"
     local status
-    status=$(git -C /workspace status 2>&1)
+    status=$(git -C "$check_dir" status 2>&1)
     if [ $? -ne 0 ]; then
         echo ""
-        echo "WARNING: git is not working in /workspace"
+        echo "WARNING: git is not working in $check_dir"
         echo "  Error: $status"
-        if [ -n "$RC_WORKTREE_NAME" ]; then
-            echo "  GIT_DIR=$GIT_DIR"
-            echo "  commondir: $(cat "$GIT_DIR/commondir" 2>/dev/null || echo '(missing)')"
-            echo "  HEAD: $(cat "$GIT_DIR/HEAD" 2>/dev/null || echo '(missing)')"
-        else
-            echo "  /workspace/.git: $(cat /workspace/.git 2>/dev/null || ls -la /workspace/.git 2>/dev/null || echo '(missing)')"
-        fi
+        echo "  .git: $(cat "$check_dir/.git" 2>/dev/null || ls -la "$check_dir/.git" 2>/dev/null || echo '(missing)')"
         echo ""
     fi
 }
@@ -271,9 +231,13 @@ if [ -n "$RC_SETUP_SCRIPT" ]; then
     bash -c "$RC_SETUP_SCRIPT"
 fi
 
+# Determine working directory: worktree containers use the host path directly
+WORK_DIR="${RC_WORKTREE_WORKSPACE:-/workspace}"
+
 # For setup mode, run once and exit (no loop)
 # For normal mode, run in a loop so /exit triggers restart
 if [ -n "$RC_SETUP_MODE" ]; then
+    cd "$WORK_DIR"
     exec claude --dangerously-skip-permissions
 fi
 
@@ -282,6 +246,7 @@ fi
 first_run=true
 
 while true; do
+    cd "$WORK_DIR"
     if [ "$first_run" = true ]; then
         first_run=false
         if [ -n "$RC_PROMPT" ]; then

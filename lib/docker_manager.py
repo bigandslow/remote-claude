@@ -406,46 +406,29 @@ class DockerManager:
             f"{self.SESSION_LABEL}={session_id}",
             "-l",
             f"{self.ACCOUNT_LABEL}={account_name}",
-            # Mount workspace read-write
+            # Mount workspace read-write at /workspace (standard path for non-worktrees)
             "-v",
             f"{workspace_path}:/workspace",
         ]
 
-        # If workspace is a git worktree, mount the commondir read-write so git
-        # can write objects, update refs, and append reflogs.
-        # Note: Docker Desktop VirtioFS does not honor rw submounts under a ro
-        # parent bind mount, so we mount the whole commondir rw.
-        # The worktree-specific state dir is shadowed by a tmpfs so that the
-        # entrypoint's path rewrites (gitdir/commondir) don't leak back to host.
+        # For git worktrees, also mount the workspace and git commondir at their
+        # exact host paths. The .git file pointer and all worktree metadata use
+        # host paths, so mirroring them inside the container means git works
+        # without any path translation. The entrypoint cds to RC_WORKTREE_WORKSPACE
+        # so Claude runs in the right directory.
         worktree_info = _get_worktree_info(workspace_path)
         if worktree_info:
-            gitdir, wt_name = worktree_info
-            wt_dir = gitdir / "worktrees" / wt_name
+            gitdir, _wt_name = worktree_info
 
-            # Full commondir read-write (needed for commits, branch updates, reflogs)
-            args.extend(["-v", f"{gitdir}:/commondir/.git"])
+            # Mount workspace at its host path so .git file resolves correctly
+            args.extend(["-v", f"{workspace_path}:{workspace_path}"])
 
-            # This worktree's state (HEAD, index, MERGE_HEAD, etc.)
-            # Mount read-only at staging path; entrypoint copies to a tmpfs
-            # so writes (gitdir/commondir rewrites) don't leak back to host.
-            if wt_dir.exists():
-                args.extend(["-v", f"{wt_dir}:/tmp/rc-worktree-host:ro"])
-                args.extend(["--tmpfs", f"/commondir/.git/worktrees/{wt_name}:mode=1777"])
+            # Mount git commondir at its host path
+            args.extend(["-v", f"{gitdir}:{gitdir}"])
 
-            # Overlay the workspace .git file with container-internal gitdir pointer.
-            # Without this, writes to /workspace/.git (a bind mount) would corrupt
-            # the host worktree's .git file.
-            # Note: NOT registered for atexit cleanup because Docker Desktop for Mac
-            # requires the host file to exist for the bind mount's lifetime.
-            git_file = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".git", delete=False, prefix="rc-wt-"
-            )
-            git_file.write(f"gitdir: /commondir/.git/worktrees/{wt_name}\n")
-            git_file.close()
-            args.extend(["-v", f"{git_file.name}:/workspace/.git:ro"])
-
-            # Pass worktree name so entrypoint can set up worktree state
-            args.extend(["-e", f"RC_WORKTREE_NAME={wt_name}"])
+            # Pass paths to entrypoint for safe.directory and working dir
+            args.extend(["-e", f"RC_WORKTREE_WORKSPACE={workspace_path}"])
+            args.extend(["-e", f"RC_WORKTREE_GITDIR={gitdir}"])
 
         # Mount credentials read-only (resolved for account)
         # Priority: deploy keys > bot account > personal credentials
