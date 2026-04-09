@@ -1127,6 +1127,7 @@ class RemoteClaude:
         import re
 
         prompts_handled = set()
+        start_time = time.time()
         # 180 iterations * 2s = 6 minutes max (extra time for OAuth wait)
         for _ in range(180):
             time.sleep(2)
@@ -1202,8 +1203,11 @@ class RemoteClaude:
                 prompts_handled.add("trust")
                 continue
 
-            # Main prompt reached - send /exit and commit
-            if (">" in output or "Welcome back" in output) and "trust" in prompts_handled:
+            # Main prompt reached - send /exit and commit.
+            # Wait at least 15s to ensure Claude has fully started before
+            # committing — credentials already mounted means no prompts appear.
+            elapsed = time.time() - start_time
+            if elapsed >= 15 and (">" in output or "Welcome back" in output):
                 print("  Setup complete, sending /exit...")
                 time.sleep(2)
                 self.tmux.send_keys(session_name, "/exit", enter=True)
