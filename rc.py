@@ -23,9 +23,35 @@ from lib.docker_manager import DockerManager
 from lib.tmux_manager import TmuxManager
 
 
+def is_wsl() -> bool:
+    """Check if running inside Windows Subsystem for Linux."""
+    if sys.platform != "linux":
+        return False
+    try:
+        with open("/proc/version") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def open_url(url: str) -> None:
+    """Open a URL in the default browser, cross-platform."""
+    if sys.platform == "darwin":
+        subprocess.run(["open", url], check=False)
+    elif is_wsl():
+        # wslview is provided by wslu; fall back to printing if unavailable
+        result = subprocess.run(["which", "wslview"], capture_output=True)
+        if result.returncode == 0:
+            subprocess.run(["wslview", url], check=False)
+        else:
+            print(f"  Open this URL in your browser: {url}")
+    else:
+        import webbrowser
+        webbrowser.open(url)
+
+
 def check_docker_running() -> bool:
     """Check if Docker daemon is running."""
-    import subprocess
     result = subprocess.run(
         ["docker", "info"],
         capture_output=True,
@@ -40,8 +66,6 @@ def ensure_docker_running() -> bool:
     Returns:
         True if Docker is running (or was started successfully)
     """
-    import subprocess
-
     if check_docker_running():
         return True
 
@@ -68,6 +92,11 @@ def ensure_docker_running() -> bool:
         else:
             print("Please start Docker Desktop and try again.")
             return False
+    elif is_wsl():
+        # Docker Desktop for Windows with WSL2 integration must be started from Windows
+        print("Please start Docker Desktop from the Windows taskbar and try again.")
+        print("Make sure WSL integration is enabled: Docker Desktop → Settings → Resources → WSL Integration")
+        return False
     else:
         # Linux - suggest starting the service
         print("Please start Docker daemon:")
@@ -1164,7 +1193,7 @@ class RemoteClaude:
                 if url_match:
                     url = url_match.group(1)
                     print("  Opening browser for authentication...")
-                    subprocess.run(["open", url], check=False)
+                    open_url(url)
                     print()
                     print("  Waiting for authorization code. Send it with:")
                     print('    rc send rc-setup "<paste-code-here>"')
