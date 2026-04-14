@@ -607,6 +607,7 @@ EOF
 # Regenerate SSH config from registry
 regenerate_deploy_ssh_config() {
     local ssh_config="$DEPLOY_KEYS_DIR/.ssh/config"
+    local extra_hosts="$DEPLOY_KEYS_DIR/.ssh/extra-hosts.conf"
 
     cat > "$ssh_config" << 'EOF'
 # SSH config for Remote Claude deploy keys
@@ -643,8 +644,90 @@ Host github-{alias}
 ssh_config.write_text(config_content)
 EOF
 
+    # Append personal/extra host entries (survive regeneration)
+    if [[ -f "$extra_hosts" ]]; then
+        echo "" >> "$ssh_config"
+        echo "# Personal SSH hosts (from extra-hosts.conf)" >> "$ssh_config"
+        cat "$extra_hosts" >> "$ssh_config"
+    fi
+
     chmod 600 "$ssh_config"
     info "SSH config updated: $ssh_config"
+}
+
+# Add a personal SSH host entry that survives deploy key config regeneration
+add_ssh_host() {
+    local hostname="${1:-}"
+    local key_path="${2:-}"
+
+    if [[ -z "$hostname" || -z "$key_path" ]]; then
+        header "Add SSH Host"
+        echo "Add a personal SSH host entry to the deploy keys SSH config."
+        echo "These entries survive 'regenerate deploy keys config' calls."
+        echo ""
+        read -p "Hostname (e.g. bitbucket.org): " hostname
+        read -p "Identity file path (e.g. ~/.ssh/id_ed25519_bitbucket_work): " key_path
+    fi
+
+    key_path="${key_path/#\~/$HOME}"
+    local key_path_expanded
+    key_path_expanded=$(eval echo "$key_path")
+
+    if [[ ! -f "$key_path_expanded" ]]; then
+        error "Key file not found: $key_path_expanded"
+        exit 1
+    fi
+
+    init_directories
+
+    # Copy key into deploy keys SSH dir
+    local key_filename
+    key_filename=$(basename "$key_path_expanded")
+    local dest_key="$DEPLOY_KEYS_DIR/.ssh/$key_filename"
+    cp "$key_path_expanded" "$dest_key"
+    chmod 600 "$dest_key"
+    # Copy public key if it exists
+    if [[ -f "${key_path_expanded}.pub" ]]; then
+        cp "${key_path_expanded}.pub" "${dest_key}.pub"
+    fi
+
+    # Write/update extra-hosts.conf
+    local extra_hosts="$DEPLOY_KEYS_DIR/.ssh/extra-hosts.conf"
+    # Remove existing entry for this hostname if present
+    if [[ -f "$extra_hosts" ]]; then
+        python3 << PYEOF
+from pathlib import Path
+
+extra = Path("$extra_hosts")
+lines = extra.read_text().splitlines(keepends=True)
+out = []
+skip = False
+for line in lines:
+    if line.strip().startswith("Host ") and "$hostname" in line:
+        skip = True
+    elif line.strip().startswith("Host ") and skip:
+        skip = False
+    if not skip:
+        out.append(line)
+extra.write_text("".join(out))
+PYEOF
+    fi
+
+    cat >> "$extra_hosts" << EOF
+
+Host $hostname
+    HostName $hostname
+    User git
+    IdentityFile $dest_key
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+EOF
+
+    regenerate_deploy_ssh_config
+    info "Added SSH host: $hostname → $dest_key"
+    echo ""
+    echo "Test with:"
+    echo "  ssh -T git@$hostname"
 }
 
 # Setup deploy keys (interactive)
@@ -993,6 +1076,9 @@ main() {
         --list-repos)
             list_deploy_keys
             ;;
+        --add-ssh-host)
+            add_ssh_host "$2" "$3"
+            ;;
         --gcp-only)
             init_directories
             setup_gcp_credentials
@@ -1010,6 +1096,7 @@ main() {
             echo "  --add-repo       Add a deploy key for a new repository"
             echo "  --remove-repo    Remove a deploy key"
             echo "  --list-repos     List configured deploy key repositories"
+            echo "  --add-ssh-host   Add a personal SSH host (e.g. bitbucket.org)"
             echo "  --gcp-only       Only setup GCP credentials"
             echo "  --status         Show current configuration"
             echo "  --help           Show this help message"

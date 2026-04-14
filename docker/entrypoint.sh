@@ -176,6 +176,9 @@ if [ -n "$RC_USE_DEPLOY_KEYS" ]; then
     export GIT_CONFIG_GLOBAL=/tmp/.gitconfig
     echo 'export GIT_CONFIG_GLOBAL=/tmp/.gitconfig' >> /home/claude/.bashrc
     echo 'export GIT_CONFIG_GLOBAL=/tmp/.gitconfig' >> /home/claude/.profile
+    # Always fix SSH config paths even when no deploy key repos are configured
+    # (needed for personal SSH hosts like bitbucket.org)
+    fix_ssh_config_paths
     setup_deploy_keys
 elif [ -f /home/claude/.gitconfig ]; then
     # Use mounted gitconfig directly
