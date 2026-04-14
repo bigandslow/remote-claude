@@ -130,6 +130,16 @@ deploy_keys:
 
 Deploy keys are scoped per-project — only repos listed in `deploy_keys` are configured in that project's containers.
 
+### Non-GitHub SSH Hosts (Bitbucket, GitLab, etc.)
+
+When deploy keys are active, the containers use a managed SSH config that only covers configured repos. To also allow access to other SSH hosts (e.g. Bitbucket), register a personal key that will be included in that config and survive regeneration:
+
+```bash
+./setup/credentials-setup.sh --add-ssh-host bitbucket.org ~/.ssh/id_ed25519_bitbucket
+```
+
+This copies the key into the deploy keys directory and adds a persistent `Host` entry. Each developer on the project runs this once with their own key — no project config changes are needed.
+
 ## Mobile Access
 
 Access sessions from iPhone using [Blink Shell](https://blink.sh) + [Tailscale](https://tailscale.com):

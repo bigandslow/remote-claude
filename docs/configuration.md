@@ -134,6 +134,24 @@ deploy_keys:
 
 Deploy keys are scoped per-project. Only repos listed in `deploy_keys` get git insteadOf rules configured. This prevents credential leakage across unrelated projects.
 
+### Adding non-GitHub SSH hosts
+
+When deploy keys are active, containers use a managed `~/.ssh/config` that only covers configured GitHub repos. To also allow SSH access to other hosts (Bitbucket, GitLab, self-hosted git, etc.), register a personal key with:
+
+```bash
+./setup/credentials-setup.sh --add-ssh-host <hostname> <key-path>
+
+# Example:
+./setup/credentials-setup.sh --add-ssh-host bitbucket.org ~/.ssh/id_ed25519_bitbucket
+```
+
+This:
+1. Copies the key file into `~/.config/remote-claude/credentials/deploy-keys/.ssh/`
+2. Writes a `Host` entry to `extra-hosts.conf` in the same directory
+3. Regenerates `~/.ssh/config` inside the deploy keys directory, appending the extra host entries
+
+The `extra-hosts.conf` file is not overwritten when deploy key repos are added or removed, so this registration is persistent. Each developer runs this once with their own key — it is a local machine configuration, not a project configuration.
+
 ## Session Persistence
 
 Sessions are stored in `~/.claude/projects/<encoded-path>/`. The path is encoded by replacing `/`, `.`, and `_` with `-`.
