@@ -74,6 +74,8 @@ def _ensure_op_wrapper_bridge(socket_path: Path) -> bool:
     """
     daemon_sock = socket_path / "daemon.sock"
     if not daemon_sock.exists():
+        print(f"Warning: op-wrapper socket not found at {daemon_sock}")
+        print("  Start the daemon: setup/op-wrapper-service.sh start")
         return False
 
     # Check if bridge is already listening
@@ -84,17 +86,17 @@ def _ensure_op_wrapper_bridge(socket_path: Path) -> bool:
     if check.returncode == 0:
         return True  # already running
 
-    # Find socat
-    socat = subprocess.run(["which", "socat"], capture_output=True, text=True)
-    if socat.returncode != 0:
-        # Try known install location
-        candidate = Path.home() / "Library" / "socat" / "bin" / "socat"
-        if candidate.exists():
-            socat_bin = str(candidate)
-        else:
-            return False
+    # Find socat — check known install location first, then PATH
+    candidate = Path.home() / "Library" / "socat" / "bin" / "socat"
+    if candidate.exists():
+        socat_bin = str(candidate)
     else:
-        socat_bin = socat.stdout.strip()
+        which = subprocess.run(["which", "socat"], capture_output=True, text=True)
+        if which.returncode != 0:
+            print(f"Warning: socat not found — cannot start op-wrapper TCP bridge")
+            print("  Install socat or set op_socket to empty in config to suppress this warning")
+            return False
+        socat_bin = which.stdout.strip()
 
     subprocess.Popen(
         [
@@ -106,6 +108,7 @@ def _ensure_op_wrapper_bridge(socket_path: Path) -> bool:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    print(f"  Started op-wrapper TCP bridge on :{OP_WRAPPER_TCP_PORT}")
     return True
 
 

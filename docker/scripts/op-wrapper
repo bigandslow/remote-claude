@@ -2,26 +2,71 @@
 #
 # op-wrapper - Container-side proxy for 1Password CLI
 #
-# Sends commands to the host's op-wrapper-daemon via TCP bridge.
+# Routes op read commands to the host op-wrapper-daemon via TCP bridge.
 # Only 'read' subcommands are permitted by the daemon.
 #
-# Connection: host.docker.internal:RC_OP_WRAPPER_PORT (TCP bridge over socat)
-# Docker Desktop for Mac (VirtioFS) does not support Unix socket connections
-# through bind mounts, so a TCP bridge is used instead.
+# Required env vars (set by rc start when op_socket is configured):
+#   RC_OP_WRAPPER_HOST  - host.docker.internal
+#   RC_OP_WRAPPER_PORT  - TCP port of the socat bridge (default 2626)
+#
+# Usage:
+#   op read "op://Vault/Item/field"   - read a secret
+#   op --check                         - verify connectivity to daemon
 
 set -euo pipefail
 
-if [ -z "${RC_OP_WRAPPER_HOST:-}" ] || [ -z "${RC_OP_WRAPPER_PORT:-}" ]; then
-    echo "Error: 1Password proxy not configured (RC_OP_WRAPPER_HOST/PORT not set)" >&2
-    echo "Ensure op_socket is set in config and the daemon is running on the host." >&2
+HOST="${RC_OP_WRAPPER_HOST:-}"
+PORT="${RC_OP_WRAPPER_PORT:-2626}"
+LOG_FILE="/tmp/op-wrapper.log"
+
+log() {
+    echo "[$(date '+%H:%M:%S')] op-wrapper: $*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+die() {
+    echo "Error: $*" >&2
+    log "ERROR: $*"
     exit 1
+}
+
+# --check: verify connectivity without reading a secret
+if [ "${1:-}" = "--check" ]; then
+    if [ -z "$HOST" ]; then
+        die "RC_OP_WRAPPER_HOST not set. Ensure op_socket is configured and rc start was used."
+    fi
+    result=$(echo "EXEC read op://check/check/check" | nc -w3 "$HOST" "$PORT" 2>/dev/null || true)
+    if [ -z "$result" ]; then
+        die "No response from daemon at ${HOST}:${PORT}. Is op-wrapper-daemon running on the host?
+  Check with: setup/op-wrapper-service.sh status
+  Start with: setup/op-wrapper-service.sh start"
+    fi
+    # Any response (even ERROR) means the daemon is reachable
+    echo "op-wrapper: connected to ${HOST}:${PORT}"
+    exit 0
 fi
 
-response=$(echo "EXEC $*" | nc -w5 "$RC_OP_WRAPPER_HOST" "$RC_OP_WRAPPER_PORT" 2>/dev/null)
+if [ -z "$HOST" ]; then
+    die "RC_OP_WRAPPER_HOST not set.
+  1Password access requires op_socket in ~/.config/remote-claude/config.yaml
+  and the session to be started with 'rc start'.
+  See: docs/configuration.md"
+fi
+
+log "EXEC $*"
+
+response=$(echo "EXEC $*" | nc -w10 "$HOST" "$PORT" 2>/dev/null || true)
 
 if [ -z "$response" ]; then
-    echo "Error: No response from 1Password proxy daemon at ${RC_OP_WRAPPER_HOST}:${RC_OP_WRAPPER_PORT}" >&2
-    exit 1
+    # Distinguish: is the port open at all?
+    if nc -w2 -z "$HOST" "$PORT" 2>/dev/null; then
+        die "Connected to ${HOST}:${PORT} but got no response. The daemon may be overloaded or the handler crashed.
+  Check logs: setup/op-wrapper-service.sh logs"
+    else
+        die "Cannot connect to ${HOST}:${PORT}. The TCP bridge is not running.
+  It starts automatically with 'rc start'. If you restarted the session manually:
+  1. Ensure op-wrapper-daemon is running: setup/op-wrapper-service.sh status
+  2. Start the bridge: socat TCP-LISTEN:${PORT},fork,reuseaddr UNIX-CLIENT:~/.op-wrapper/sock/daemon.sock &"
+    fi
 fi
 
 status=$(echo "$response" | awk '{print $1}')
@@ -29,14 +74,17 @@ payload=$(echo "$response" | cut -d' ' -f2-)
 
 case "$status" in
     OK)
+        log "OK (${#payload} bytes)"
         echo "$payload" | base64 -d
         ;;
     ERROR)
+        log "DAEMON ERROR: $payload"
+        # Strip the OK/ERROR prefix and pass through the daemon's message
         echo "Error: $payload" >&2
         exit 1
         ;;
     *)
-        echo "Error: Unexpected response from daemon: $response" >&2
-        exit 1
+        log "UNEXPECTED: $response"
+        die "Unexpected response from daemon: $response"
         ;;
 esac
