@@ -55,6 +55,59 @@ def _get_worktree_info(workspace_path: Path) -> Optional[tuple[Path, str]]:
 # Track temp files for secure cleanup (WIF tokens, credential configs)
 _TEMP_FILES_TO_CLEANUP: set[str] = set()
 
+# Fixed TCP port for the op-wrapper bridge (host → container)
+OP_WRAPPER_TCP_PORT = 2626
+
+
+def _ensure_op_wrapper_bridge(socket_path: Path) -> bool:
+    """Start a socat TCP bridge for the op-wrapper daemon if not already running.
+
+    Docker Desktop for Mac (VirtioFS) does not support connecting to Unix sockets
+    through bind mounts. Instead, we bridge the Unix socket to a TCP port and have
+    the container connect via host.docker.internal.
+
+    Args:
+        socket_path: Path to the op-wrapper daemon socket directory (contains daemon.sock)
+
+    Returns:
+        True if the bridge is running (or was started successfully)
+    """
+    daemon_sock = socket_path / "daemon.sock"
+    if not daemon_sock.exists():
+        return False
+
+    # Check if bridge is already listening
+    check = subprocess.run(
+        ["lsof", "-iTCP", f":{OP_WRAPPER_TCP_PORT}", "-sTCP:LISTEN"],
+        capture_output=True,
+    )
+    if check.returncode == 0:
+        return True  # already running
+
+    # Find socat
+    socat = subprocess.run(["which", "socat"], capture_output=True, text=True)
+    if socat.returncode != 0:
+        # Try known install location
+        candidate = Path.home() / "Library" / "socat" / "bin" / "socat"
+        if candidate.exists():
+            socat_bin = str(candidate)
+        else:
+            return False
+    else:
+        socat_bin = socat.stdout.strip()
+
+    subprocess.Popen(
+        [
+            socat_bin,
+            f"TCP-LISTEN:{OP_WRAPPER_TCP_PORT},fork,reuseaddr",
+            f"UNIX-CLIENT:{daemon_sock}",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return True
+
 
 def _cleanup_temp_files() -> None:
     """Clean up temporary credential files on exit.
@@ -586,11 +639,18 @@ class DockerManager:
                 args.extend(["-v", f"{creds.claude_gcp}:/home/claude/.config/gcloud/application_default_credentials.json:ro"])
                 args.extend(["-e", "GOOGLE_APPLICATION_CREDENTIALS=/home/claude/.config/gcloud/application_default_credentials.json"])
 
-        # Mount 1Password proxy socket directory if available
-        # This mounts the dedicated sock/ directory (not the socket file directly)
-        # because Docker Desktop for Mac cannot mount Unix sockets through the VM.
+        # 1Password proxy: bridge Unix socket to TCP for container access.
+        # Docker Desktop for Mac (VirtioFS) cannot pass Unix socket connections
+        # through bind mounts, so we use a socat TCP bridge instead.
+        # Containers connect via host.docker.internal:OP_WRAPPER_TCP_PORT.
         if creds.op_socket and creds.op_socket.exists():
-            args.extend(["-v", f"{creds.op_socket}:/run/op-wrapper"])
+            if _ensure_op_wrapper_bridge(creds.op_socket):
+                args.extend(["-e", f"RC_OP_WRAPPER_HOST=host.docker.internal"])
+                args.extend(["-e", f"RC_OP_WRAPPER_PORT={OP_WRAPPER_TCP_PORT}"])
+                # On Linux, host.docker.internal is not auto-injected
+                import sys
+                if sys.platform != "darwin":
+                    args.extend(["--add-host", "host.docker.internal:host-gateway"])
 
         # Mount safety hooks for YOLO mode protection
         hooks_dir = Path(__file__).parent.parent / "hooks"

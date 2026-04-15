@@ -2,23 +2,25 @@
 #
 # op-wrapper - Container-side proxy for 1Password CLI
 #
-# Sends commands to the host's op-wrapper-daemon via a mounted Unix socket.
+# Sends commands to the host's op-wrapper-daemon via TCP bridge.
 # Only 'read' subcommands are permitted by the daemon.
+#
+# Connection: host.docker.internal:RC_OP_WRAPPER_PORT (TCP bridge over socat)
+# Docker Desktop for Mac (VirtioFS) does not support Unix socket connections
+# through bind mounts, so a TCP bridge is used instead.
 
 set -euo pipefail
 
-SOCKET_PATH="/run/op-wrapper/daemon.sock"
-
-if [ ! -S "$SOCKET_PATH" ]; then
-    echo "Error: 1Password proxy socket not available at $SOCKET_PATH" >&2
-    echo "Ensure op_socket is configured and the daemon is running on the host." >&2
+if [ -z "${RC_OP_WRAPPER_HOST:-}" ] || [ -z "${RC_OP_WRAPPER_PORT:-}" ]; then
+    echo "Error: 1Password proxy not configured (RC_OP_WRAPPER_HOST/PORT not set)" >&2
+    echo "Ensure op_socket is set in config and the daemon is running on the host." >&2
     exit 1
 fi
 
-response=$(echo "EXEC $*" | nc -U "$SOCKET_PATH" 2>/dev/null)
+response=$(echo "EXEC $*" | nc -w5 "$RC_OP_WRAPPER_HOST" "$RC_OP_WRAPPER_PORT" 2>/dev/null)
 
 if [ -z "$response" ]; then
-    echo "Error: No response from 1Password proxy daemon" >&2
+    echo "Error: No response from 1Password proxy daemon at ${RC_OP_WRAPPER_HOST}:${RC_OP_WRAPPER_PORT}" >&2
     exit 1
 fi
 
