@@ -145,6 +145,7 @@ class RemoteClaude:
         account: Optional[str] = None,
         cloud: bool = False,
         node: Optional[str] = None,
+        tmux_cc: bool = False,
     ) -> int:
         """Start a new Claude session.
 
@@ -157,6 +158,7 @@ class RemoteClaude:
             account: Account profile name (uses default if None)
             cloud: Start session on a cloud node instead of locally
             node: Specific cloud node name (default: auto-place)
+            tmux_cc: If True, attach with tmux -CC for iTerm2 native integration
 
         Returns:
             Exit code (0 for success)
@@ -272,7 +274,7 @@ class RemoteClaude:
         if attach:
             print("Attaching to session... (use Ctrl+b d to detach)")
             time.sleep(0.5)  # Give tmux time to start
-            self.tmux.attach_session(session_name)
+            self.tmux.attach_session(session_name, cc_mode=tmux_cc)
 
         return 0
 
@@ -513,11 +515,12 @@ class RemoteClaude:
 
         return 0
 
-    def attach(self, session_id: Optional[str] = None) -> int:
+    def attach(self, session_id: Optional[str] = None, tmux_cc: bool = False) -> int:
         """Attach to an existing session (auto-detects local vs cloud).
 
         Args:
             session_id: Session ID or partial match. If None, shows interactive picker.
+            tmux_cc: If True, use tmux -CC for iTerm2 native integration.
 
         Returns:
             Exit code
@@ -527,7 +530,7 @@ class RemoteClaude:
             cloud_match = self._find_cloud_session(session_id)
             if cloud_match:
                 full_id, data = cloud_match
-                return self._attach_cloud(full_id, data)
+                return self._attach_cloud(full_id, data, tmux_cc=tmux_cc)
 
         container = self._find_or_select_container(
             session_id, "Select a session to attach:"
@@ -539,13 +542,13 @@ class RemoteClaude:
         session_name = self.tmux.get_session_name(extracted_id)
 
         if self.tmux.session_exists(session_name):
-            self.tmux.attach_session(session_name)
+            self.tmux.attach_session(session_name, cc_mode=tmux_cc)
             return 0
         else:
             print(f"Error: Tmux session not found for {extracted_id}")
             return 1
 
-    def _attach_cloud(self, session_id: str, session_data: dict) -> int:
+    def _attach_cloud(self, session_id: str, session_data: dict, tmux_cc: bool = False) -> int:
         """Attach to a cloud session via SSH."""
         node_name = session_data.get("node")
         if not node_name or not self.cloud:
@@ -565,7 +568,7 @@ class RemoteClaude:
         session_name = cloud_tmux.get_session_name(session_id)
 
         print(f"Attaching to cloud session on {node_name}... (use Ctrl+b d to detach)")
-        cloud_tmux.attach_session(session_name)
+        cloud_tmux.attach_session(session_name, cc_mode=tmux_cc)
         return 0
 
     def kill(self, session_id: Optional[str] = None, force: bool = False) -> int:
@@ -2212,6 +2215,10 @@ Examples:
         "--node",
         help="Specific cloud node name (default: auto-place)"
     )
+    start_parser.add_argument(
+        "--tmux-cc", action="store_true",
+        help="Attach with tmux -CC (iTerm2 native integration: native scrollback, search, tabs)"
+    )
 
     # list command
     list_parser = subparsers.add_parser("list", aliases=["ls"], help="List sessions")
@@ -2222,6 +2229,7 @@ Examples:
     # attach command
     attach_parser = subparsers.add_parser("attach", aliases=["a"], help="Attach to session")
     attach_parser.add_argument("session_id", nargs="?", default=None, help="Session ID (partial match OK). If omitted, shows picker.")
+    attach_parser.add_argument("--tmux-cc", action="store_true", help="Use tmux -CC (iTerm2 native integration: native scrollback, search, tabs)")
 
     # kill command
     kill_parser = subparsers.add_parser("kill", aliases=["rm"], help="Kill a session")
@@ -2373,11 +2381,12 @@ Examples:
             account=args.account,
             cloud=args.cloud,
             node=args.node,
+            tmux_cc=args.tmux_cc,
         )
     elif args.command in ("list", "ls"):
         return app.list_sessions(all_states=args.all)
     elif args.command in ("attach", "a"):
-        return app.attach(args.session_id)
+        return app.attach(args.session_id, tmux_cc=args.tmux_cc)
     elif args.command in ("kill", "rm"):
         return app.kill(args.session_id, force=args.force)
     elif args.command in ("restart", "r"):

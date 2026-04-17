@@ -42,16 +42,23 @@ class CloudTmuxManager(TmuxManager):
             text=True,
         )
 
-    def attach_session(self, session_name: str) -> None:
+    def attach_session(self, session_name: str, cc_mode: bool = False) -> None:
         """Attach to a remote tmux session via SSH.
 
         Replaces the current process with an SSH connection that
         attaches to the tmux session on the cloud node.
+
+        Args:
+            session_name: Name of the tmux session
+            cc_mode: If True, use -CC (control mode) for iTerm2 native integration
         """
+        tmux_cmd = ["tmux", "-L", self.socket_name]
+        if cc_mode:
+            tmux_cmd.append("-CC")
+        tmux_cmd.extend(["attach-session", "-t", session_name])
         os.execvp("ssh", [
             "ssh", "-t",
             *SSH_OPTS,
             self._ssh_host,
-            "tmux", "-L", self.socket_name,
-            "attach-session", "-t", session_name,
+            *tmux_cmd,
         ])

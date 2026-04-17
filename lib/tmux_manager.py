@@ -86,17 +86,22 @@ class TmuxManager:
         result = self._run_tmux(["kill-session", "-t", session_name], check=False)
         return result.returncode == 0
 
-    def attach_session(self, session_name: str) -> None:
+    def attach_session(self, session_name: str, cc_mode: bool = False) -> None:
         """Attach to an existing tmux session.
 
         This replaces the current process with tmux attach.
+
+        Args:
+            session_name: Name of the tmux session
+            cc_mode: If True, use -CC (control mode) for iTerm2 native integration
         """
         import os
 
-        os.execvp(
-            "tmux",
-            ["tmux", "-L", self.socket_name, "attach-session", "-t", session_name],
-        )
+        cmd = ["tmux", "-L", self.socket_name]
+        if cc_mode:
+            cmd.append("-CC")
+        cmd.extend(["attach-session", "-t", session_name])
+        os.execvp("tmux", cmd)
 
     def send_keys(self, session_name: str, keys: str, enter: bool = True) -> bool:
         """Send keys to a tmux session.
