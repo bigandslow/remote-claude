@@ -16,7 +16,8 @@
 
 set -e
 
-DAEMON_SCRIPT="$HOME/GitHub/utilities/1password_wrapper/op-wrapper-daemon"
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+DAEMON_SCRIPT="$SCRIPT_DIR/op-wrapper-daemon.py"
 PLIST_NAME="com.remote-claude.op-wrapper-daemon"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_NAME}.plist"
 LOG_FILE="$HOME/.op-wrapper/daemon.log"
@@ -36,16 +37,21 @@ create_plist() {
     mkdir -p "$HOME/Library/LaunchAgents"
     mkdir -p "$HOME/.op-wrapper/sock"
 
-    # Locate socat — daemon script adds ~/Library/socat/bin to PATH but
-    # LaunchAgents don't inherit the user shell PATH.
-    local socat_path
-    if [ -x "$HOME/Library/socat/bin/socat" ]; then
-        socat_path="$HOME/Library/socat/bin"
-    elif command -v socat &>/dev/null; then
-        socat_path="$(dirname "$(command -v socat)")"
+    # Locate python3 — needed to run the daemon
+    local python_bin
+    if command -v python3 &>/dev/null; then
+        python_bin="$(command -v python3)"
     else
-        error "socat not found. Install it before running this service."
+        error "python3 not found. Install Python 3 before running this service."
         exit 1
+    fi
+
+    # The daemon runs `op read` — make sure op is on the LaunchAgent's PATH
+    local op_dir
+    if command -v op &>/dev/null; then
+        op_dir="$(dirname "$(command -v op)")"
+    else
+        op_dir="/usr/local/bin"
     fi
 
     cat > "$PLIST_PATH" << EOF
@@ -58,7 +64,7 @@ create_plist() {
 
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
+        <string>${python_bin}</string>
         <string>${DAEMON_SCRIPT}</string>
     </array>
 
@@ -77,7 +83,7 @@ create_plist() {
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>${socat_path}:/usr/local/bin:/usr/bin:/bin</string>
+        <string>${op_dir}:/usr/local/bin:/usr/bin:/bin</string>
         <key>HOME</key>
         <string>${HOME}</string>
     </dict>
