@@ -34,7 +34,8 @@ if [ "${1:-}" = "--check" ]; then
     if [ -z "$HOST" ]; then
         die "RC_OP_WRAPPER_HOST not set. Ensure op_socket is configured and rc start was used."
     fi
-    result=$(echo "EXEC read op://check/check/check" | nc -w3 "$HOST" "$PORT" 2>/dev/null || true)
+    # Send an unrecognized command — handler responds instantly with ERROR (no op call needed)
+    result=$(echo "PING" | nc -q2 -w3 "$HOST" "$PORT" 2>/dev/null || true)
     if [ -z "$result" ]; then
         die "No response from daemon at ${HOST}:${PORT}. Is op-wrapper-daemon running on the host?
   Check with: setup/op-wrapper-service.sh status
@@ -54,7 +55,7 @@ fi
 
 log "EXEC $*"
 
-response=$(echo "EXEC $*" | nc -w10 "$HOST" "$PORT" 2>/dev/null || true)
+response=$(echo "EXEC $*" | nc -q2 -w10 "$HOST" "$PORT" 2>/dev/null || true)
 
 if [ -z "$response" ]; then
     # Distinguish: is the port open at all?
