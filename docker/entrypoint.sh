@@ -212,9 +212,13 @@ fi
 # Validate git setup and warn if broken
 validate_git() {
     local check_dir="${RC_WORKTREE_WORKSPACE:-/workspace}"
+    # Setup containers have no workspace — skip validation
+    if [ ! -d "$check_dir" ]; then
+        return 0
+    fi
     local status
-    status=$(git -C "$check_dir" status 2>&1)
-    if [ $? -ne 0 ]; then
+    status=$(git -C "$check_dir" status 2>&1) || true
+    if ! git -C "$check_dir" status >/dev/null 2>&1; then
         echo ""
         echo "WARNING: git is not working in $check_dir"
         echo "  Error: $status"
@@ -240,7 +244,8 @@ WORK_DIR="${RC_WORKTREE_WORKSPACE:-/workspace}"
 # For setup mode, run once and exit (no loop)
 # For normal mode, run in a loop so /exit triggers restart
 if [ -n "$RC_SETUP_MODE" ]; then
-    cd "$WORK_DIR"
+    # Setup containers don't mount a workspace — only cd if the dir exists
+    [ -d "$WORK_DIR" ] && cd "$WORK_DIR" || cd /home/claude
     exec claude --dangerously-skip-permissions
 fi
 

@@ -1192,7 +1192,11 @@ class RemoteClaude:
 
             # OAuth URL - open browser and wait for code via rc send
             if "oauth/authorize" in output and "oauth" not in prompts_handled:
-                url_match = re.search(r'(https://claude\.ai/oauth/authorize\S+)', output.replace('\n', ''))
+                # Claude OAuth URL: historically claude.ai/oauth/authorize, now claude.com/cai/oauth/authorize.
+                # Tmux wraps long URLs at column 80, so strip newlines before matching.
+                # Also strip trailing whitespace/carriage returns that may trail the URL.
+                flat = output.replace('\n', '').replace('\r', '')
+                url_match = re.search(r'(https://claude\.(?:ai|com)/(?:cai/)?oauth/authorize\S+)', flat)
                 if url_match:
                     url = url_match.group(1)
                     print("  Opening browser for authentication...")
