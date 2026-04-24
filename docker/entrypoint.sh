@@ -232,10 +232,17 @@ validate_git
 # Configure safety protections
 setup_safety_hook
 
-# Run project setup commands passed via environment variable
+# Run project setup commands passed via environment variable.
+# Don't let setup failures kill the container — surface the error and continue
+# so the user can attach and fix their .rc/project.yaml.
 if [ -n "$RC_SETUP_SCRIPT" ]; then
     echo "Running project setup commands..."
-    bash -c "$RC_SETUP_SCRIPT"
+    if ! bash -c "$RC_SETUP_SCRIPT"; then
+        echo ""
+        echo "WARNING: project setup commands failed (exit $?). Continuing anyway —"
+        echo "  inspect your .rc/project.yaml to fix broken commands."
+        echo ""
+    fi
 fi
 
 # Determine working directory: worktree containers use the host path directly
