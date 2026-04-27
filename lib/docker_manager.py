@@ -55,6 +55,53 @@ def _get_worktree_info(workspace_path: Path) -> Optional[tuple[Path, str]]:
 # Track temp files for secure cleanup (WIF tokens, credential configs)
 _TEMP_FILES_TO_CLEANUP: set[str] = set()
 
+
+def _claude_projects_encoded_name(workspace_path: Path, is_worktree: bool) -> str:
+    """Return the directory name claude uses under ~/.claude/projects/ for a workspace.
+
+    Claude derives this name from its current working directory by replacing
+    /, ., and _ with -. Inside the container:
+      - Non-worktree containers cd to /workspace, so the name is '-workspace'.
+      - Worktree containers cd to the host workspace path (mounted at the same
+        host path inside the container), so the name encodes the full host path.
+
+    The bind-mount destination MUST match this name; otherwise claude writes
+    its session transcript to a non-mounted path and loses it on container exit.
+
+    Args:
+        workspace_path: The host path to the workspace.
+        is_worktree: True when the workspace is a git worktree (mounted at
+            its host path) — distinguishes the cwd claude will see.
+    """
+    cwd_in_container = str(workspace_path) if is_worktree else "/workspace"
+    return cwd_in_container.replace("/", "-").replace(".", "-").replace("_", "-")
+
+
+def _projects_bind_mount(
+    workspace_path: Path,
+    host_projects_root: Path,
+    is_worktree: bool,
+) -> tuple[Path, str]:
+    """Return (host_source, container_destination) for the projects bind mount.
+
+    Both ends use the same encoded directory name so that:
+      - Outside the container: `claude -c` from the host finds the transcript
+        under ~/.claude/projects/<encoded-host-path>/.
+      - Inside the container: claude writes its transcript to
+        ~/.claude/projects/<encoded-cwd>/, which is the bind-mount destination.
+
+    For non-worktree containers the host source is the encoded host path
+    (so the host claude finds it) but the destination is '-workspace' (because
+    that's how claude inside encodes /workspace).
+    """
+    host_encoded = (
+        str(workspace_path).replace("/", "-").replace(".", "-").replace("_", "-")
+    )
+    source = host_projects_root / host_encoded
+    container_encoded = _claude_projects_encoded_name(workspace_path, is_worktree)
+    destination = f"/home/claude/.claude/projects/{container_encoded}"
+    return source, destination
+
 # Fixed TCP port for the op-wrapper bridge (host → container)
 OP_WRAPPER_TCP_PORT = 2626
 
@@ -524,12 +571,17 @@ class DockerManager:
         # Claude config - selective mounts to avoid container polluting host config
         claude_dir = creds.claude
         if claude_dir.exists():
-            # Session history (read-write) - mount only this workspace's project dir
-            # Claude encodes paths by replacing / . and _ with -
-            encoded_path = str(workspace_path).replace("/", "-").replace(".", "-").replace("_", "-")
-            project_dir = claude_dir / "projects" / encoded_path
-            project_dir.mkdir(parents=True, exist_ok=True)
-            args.extend(["-v", f"{project_dir}:/home/claude/.claude/projects/-workspace"])
+            # Session history (read-write) - mount only this workspace's project dir.
+            # Both ends of the mount use the same encoded directory name so the
+            # transcript is reachable both inside the container (claude writes there)
+            # and outside (host `claude -c` reads it).
+            project_source, project_dest = _projects_bind_mount(
+                workspace_path=workspace_path,
+                host_projects_root=claude_dir / "projects",
+                is_worktree=worktree_info is not None,
+            )
+            project_source.mkdir(parents=True, exist_ok=True)
+            args.extend(["-v", f"{project_source}:{project_dest}"])
 
             # Credentials (read-only)
             credentials_file = claude_dir / ".credentials.json"
