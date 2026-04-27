@@ -191,6 +191,7 @@ class ProjectConfig:
     setup_commands: list[str] = field(default_factory=list)
     deploy_keys: list[str] = field(default_factory=list)
     features: dict[str, bool] = field(default_factory=dict)
+    tmux_cc: bool = False  # Use tmux -CC (iTerm2 native integration) for attach
 
     def is_feature_enabled(self, name: str) -> bool:
         """Check if a project feature is enabled."""
@@ -227,6 +228,9 @@ def load_project_config(workspace_path: Path) -> ProjectConfig:
 
     if "features" in data and isinstance(data["features"], dict):
         config.features = {str(k): bool(v) for k, v in data["features"].items()}
+
+    if "tmux_cc" in data:
+        config.tmux_cc = bool(data["tmux_cc"])
 
     return config
 

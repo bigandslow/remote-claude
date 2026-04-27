@@ -183,6 +183,7 @@ class RemoteClaude:
                 name=name,
                 account=account,
                 node_name=node,
+                tmux_cc=tmux_cc,
             )
 
         # Ensure Docker is running
@@ -227,6 +228,10 @@ class RemoteClaude:
 
         # Load per-project configuration
         project_config = load_project_config(workspace_path)
+
+        # Project config can opt into tmux -CC; CLI flag takes precedence
+        if not tmux_cc and project_config.tmux_cc:
+            tmux_cc = True
 
         # Start Docker container
         container_id = self.docker.start_container(
@@ -287,6 +292,7 @@ class RemoteClaude:
         name: Optional[str] = None,
         account: Optional[str] = None,
         node_name: Optional[str] = None,
+        tmux_cc: bool = False,
     ) -> int:
         """Start a session on a cloud node.
 
@@ -348,6 +354,10 @@ class RemoteClaude:
         # Load per-project configuration
         project_config = load_project_config(workspace_path)
 
+        # Project config can opt into tmux -CC; CLI flag takes precedence
+        if not tmux_cc and project_config.tmux_cc:
+            tmux_cc = True
+
         # Start container on cloud
         print(f"Starting container on {node_config.name}...")
         container_id = cloud_docker.start_container(
@@ -394,7 +404,7 @@ class RemoteClaude:
         if attach:
             print(f"Attaching to cloud session on {node_config.name}... (use Ctrl+b d to detach)")
             time.sleep(0.5)
-            cloud_tmux.attach_session(session_name)
+            cloud_tmux.attach_session(session_name, cc_mode=tmux_cc)
 
         return 0
 
@@ -540,6 +550,16 @@ class RemoteClaude:
 
         extracted_id = container.name.replace("rc-", "")
         session_name = self.tmux.get_session_name(extracted_id)
+
+        # If the workspace's project.yaml opts into tmux -CC, honor it
+        # unless the CLI flag was already explicitly set.
+        if not tmux_cc:
+            session_data = self.registry.get_session(extracted_id)
+            workspace = session_data.get("workspace") if session_data else None
+            if workspace:
+                project_config = load_project_config(Path(workspace))
+                if project_config.tmux_cc:
+                    tmux_cc = True
 
         if self.tmux.session_exists(session_name):
             self.tmux.attach_session(session_name, cc_mode=tmux_cc)
