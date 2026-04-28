@@ -11,6 +11,14 @@ export PATH="/home/claude/.local/bin:$PATH"
 echo 'export PATH="/home/claude/.local/bin:$PATH"' >> /home/claude/.bashrc
 echo 'export PATH="/home/claude/.local/bin:$PATH"' >> /home/claude/.profile
 
+# Ensure /home/claude/.claude/projects is owned by claude. Docker implicitly
+# creates this dir as root when the projects/-workspace bind mount is set up
+# (if the parent didn't exist in the image), and root ownership prevents
+# claude from mkdir-ing sibling project dirs for compaction.
+if [ "$(stat -c %U /home/claude/.claude/projects 2>/dev/null)" != "claude" ]; then
+    sudo /usr/bin/chown claude:claude /home/claude/.claude/projects 2>/dev/null || true
+fi
+
 # Fix SSH config paths for container environment
 # The SSH config is generated on the host with host paths, but we need container paths
 fix_ssh_config_paths() {

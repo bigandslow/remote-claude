@@ -79,9 +79,14 @@ RUN mkdir -p /workspace && chown claude:claude /workspace
 
 # Create directories for credential mounts
 # Note: .gitconfig is a file, not a directory - don't create it
+# .claude/projects must be pre-created and owned by claude — otherwise Docker
+# implicitly creates it as root when setting up the projects/-workspace bind
+# mount, and claude can't mkdir sibling dirs there for compaction or other
+# session writes (which broke /compact in long-running containers).
 RUN mkdir -p /home/claude/.anthropic \
     /home/claude/.ssh \
     /home/claude/.claude \
+    /home/claude/.claude/projects \
     /home/claude/.config/gcloud \
     /run/op-wrapper \
     && chown -R claude:claude /home/claude \
