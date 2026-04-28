@@ -99,6 +99,9 @@ COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --chmod=755 scripts/op /usr/local/bin/op
 COPY --chmod=755 scripts/op-wrapper /usr/local/bin/op-wrapper
 
+# Permission fixer for root-owned bind-mount parents (turbo/pnpm/compact).
+COPY --chmod=755 scripts/fix-mount-perms.sh /usr/local/bin/fix-mount-perms.sh
+
 # Ensure ~/.local/bin is on PATH for all processes (non-login shells, git hooks, etc.)
 RUN echo 'PATH="/home/claude/.local/bin:$PATH"' >> /etc/environment
 

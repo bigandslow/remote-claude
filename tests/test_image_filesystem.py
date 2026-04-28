@@ -113,3 +113,53 @@ def test_default_user_in_container_is_claude():
         IMAGE, "-un",
     )
     assert proc.stdout.strip() == "claude"
+
+
+def test_claude_user_can_write_under_gitdir_parent_in_worktree_layout():
+    """Regression guard for tools that traverse to the main repo path.
+
+    For worktree containers we mount the workspace at its host path AND
+    the git commondir (`.git/`) at its host path. Docker creates the
+    *parent* of the gitdir mount implicitly as root because the path
+    didn't pre-exist in the image. Tools like turbo, pnpm, etc. then
+    try to write cache dirs at the main repo root and hit EACCES.
+
+    The startup permission fix-up (fix-mount-perms.sh, called from the
+    entrypoint) must chown those parents to claude.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        host_workspace = Path(tmp) / "feature-branch"
+        host_workspace.mkdir()
+        host_main = Path(tmp) / "main-repo"
+        host_main.mkdir()
+        host_gitdir = host_main / ".git"
+        host_gitdir.mkdir()
+        worktrees = host_gitdir / "worktrees"
+        worktrees.mkdir()
+        wt_meta = worktrees / "feature-branch"
+        wt_meta.mkdir()
+        (host_workspace / ".git").write_text(f"gitdir: {wt_meta}\n")
+
+        # Reproduce the production mount layout for a worktree container.
+        # Run fix-mount-perms.sh (what the entrypoint calls), then verify
+        # that claude can mkdir under the gitdir parent.
+        proc = _run(
+            "docker", "run", "--rm",
+            "-v", f"{host_workspace}:{host_workspace}",
+            "-v", f"{host_gitdir}:{host_gitdir}",
+            "-e", f"RC_WORKTREE_WORKSPACE={host_workspace}",
+            "-e", f"RC_WORKTREE_GITDIR={host_gitdir}",
+            "--entrypoint", "bash",
+            IMAGE,
+            "-c",
+            f"/usr/local/bin/fix-mount-perms.sh && "
+            f"mkdir {host_main}/.turbo && echo OK",
+            check=False,
+        )
+        assert proc.returncode == 0, (
+            "claude user cannot write under the gitdir parent dir, which is "
+            "where monorepo tools like turbo place caches. Docker likely "
+            "auto-created the parent as root and fix-mount-perms.sh didn't "
+            "fix it up.\n"
+            f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+        )
