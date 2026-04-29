@@ -15,6 +15,20 @@ echo 'export PATH="/home/claude/.local/bin:$PATH"' >> /home/claude/.profile
 # (projects parent, worktree gitdir parents, etc.).
 /usr/local/bin/fix-mount-perms.sh
 
+# Seed /home/claude/.claude.json from the host's read-only mount, if any.
+# We don't bind-mount the host file at the canonical path RW because
+# atomic-rename writes on the host invalidate the bind mount and concurrent
+# container writes clobber the file. The sidecar mount lets each container
+# read fresh host state once at startup, then write to its own copy.
+if [ -f /home/claude/.claude.json-host ]; then
+    if python3 -c "import json,sys; json.load(open('/home/claude/.claude.json-host'))" 2>/dev/null; then
+        cp /home/claude/.claude.json-host /home/claude/.claude.json
+        chmod 600 /home/claude/.claude.json
+    else
+        echo "WARNING: /home/claude/.claude.json-host is not valid JSON; skipping copy"
+    fi
+fi
+
 # Fix SSH config paths for container environment
 # The SSH config is generated on the host with host paths, but we need container paths
 fix_ssh_config_paths() {

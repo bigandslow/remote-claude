@@ -620,10 +620,18 @@ class DockerManager:
                 args.extend(["-v", f"{plugins_dir}:/home/claude/.claude/plugins-host:ro"])
                 args.extend(["-e", f"RC_HOST_CLAUDE_DIR={claude_dir}"])
 
-        # Claude state file (~/.claude.json) - contains oauthAccount for login bypass
+        # Claude state file (~/.claude.json). Bind-mounting the canonical
+        # path RW caused two problems: claude does atomic-rename writes so
+        # the container's bind mount goes stale (old inode), AND multiple
+        # concurrent sessions clobbered the host file producing malformed
+        # JSON, which made claude fall back to onboarding (theme picker,
+        # login). Mount the host file read-only at a sidecar path; the
+        # entrypoint copies it to the writable canonical path on startup.
         claude_json = Path.home() / ".claude.json"
         if claude_json.exists():
-            args.extend(["-v", f"{claude_json}:/home/claude/.claude.json"])
+            args.extend([
+                "-v", f"{claude_json}:/home/claude/.claude.json-host:ro",
+            ])
 
         # Extract OAuth token for login bypass (CLAUDE_CODE_OAUTH_TOKEN)
         # Priority: setup-token file > credentials.json

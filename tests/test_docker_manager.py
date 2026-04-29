@@ -99,6 +99,109 @@ class TestProjectsBindMount:
         assert str(source) == str(host_projects_root / encoded)
 
 
+class TestClaudeJsonMount:
+    """The host's ~/.claude.json should not be bind-mounted RW at the
+    canonical container path. Doing so causes:
+      - Stale data: atomic-rename writes on host change the inode; the
+        container's bind mount keeps the old inode, leaving a stale snapshot.
+      - Concurrent clobber: multiple sessions writing to the same host file
+        race and produce malformed JSON, which makes claude fall back to
+        the first-run flow (theme picker, onboarding).
+
+    The fix: mount host file at a secondary path read-only and have the
+    entrypoint copy it to the writable canonical path during startup.
+    """
+
+    def _build_args(self, monkeypatch, claude_home: Path):
+        """Drive start_container() with a stub _run_docker and return args."""
+        from lib import docker_manager as dm
+        from lib.config import CredentialsConfig
+
+        # Simulate a host with a populated ~/.claude.json
+        (claude_home.parent / ".claude.json").write_text('{"foo":"bar"}')
+
+        creds = CredentialsConfig(
+            anthropic=Path("/nonexistent/anthropic"),
+            claude=claude_home,
+            git=Path("/nonexistent/.gitconfig"),
+            ssh=Path("/nonexistent/.ssh"),
+        )
+
+        class FakeAccounts:
+            default = "default"
+
+        class FakeConfig:
+            accounts = FakeAccounts()
+            cloud = type("C", (), {"enabled": False})()
+            tmux = type("T", (), {"socket_name": "rc", "session_prefix": "rc-"})()
+            docker = type(
+                "D", (), {"image": "remote-claude:configured", "network_mode": "default", "use_isolated_network": False}
+            )()
+            network = type("N", (), {"mode": "host", "use_isolated_network": False})()
+
+            def get_credentials_for_account(self, _name):
+                # Override the home-dir-derived path so the test harness
+                # consults claude_home.parent / .claude.json rather than the
+                # real user's file.
+                creds.__dict__["_test_home"] = claude_home.parent
+                return creds
+
+        manager = dm.DockerManager(FakeConfig())
+        run_args = []
+
+        def stub_run(args, check=False, capture=False):
+            # Capture only the run invocation (start_container also calls images, etc.)
+            if args and args[0] == "run":
+                run_args.append(list(args))
+            return type("R", (), {"returncode": 0, "stdout": "remote-claude:configured\n", "stderr": ""})()
+
+        monkeypatch.setattr(manager, "_run_docker", stub_run)
+        # Patch Path.home so `Path.home() / ".claude.json"` resolves into tmp
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: claude_home.parent))
+
+        workspace = claude_home.parent / "myrepo"
+        workspace.mkdir(exist_ok=True)
+        manager.start_container(session_id="abc123", workspace_path=workspace)
+        assert run_args, "start_container did not invoke `docker run`"
+        return run_args[0]
+
+    def test_claude_json_not_mounted_rw_at_canonical_path(self, monkeypatch, tmp_path):
+        """No -v argument should mount host .claude.json RW at the canonical
+        container path, because RW exposes the file to clobber across
+        concurrent containers and to inode-staleness from atomic renames."""
+        claude_home = tmp_path / "claude"
+        claude_home.mkdir()
+        args = self._build_args(monkeypatch, claude_home)
+
+        bad_mounts = [
+            a for i, a in enumerate(args)
+            if i > 0 and args[i - 1] == "-v"
+            and a.endswith(":/home/claude/.claude.json")  # RW (no :ro suffix)
+        ]
+        assert not bad_mounts, (
+            "host .claude.json must not be bind-mounted RW at the canonical "
+            f"path; found: {bad_mounts!r}"
+        )
+
+    def test_claude_json_mounted_ro_at_host_path(self, monkeypatch, tmp_path):
+        """Host .claude.json should be exposed to the container at a
+        secondary path with :ro, so the entrypoint can copy it to a writable
+        location without risking clobber on the host."""
+        claude_home = tmp_path / "claude"
+        claude_home.mkdir()
+        args = self._build_args(monkeypatch, claude_home)
+
+        ro_mounts = [
+            a for i, a in enumerate(args)
+            if i > 0 and args[i - 1] == "-v"
+            and ".claude.json-host:ro" in a
+        ]
+        assert ro_mounts, (
+            "host .claude.json must be bind-mounted read-only at "
+            f"/home/claude/.claude.json-host; got mounts: {[a for i,a in enumerate(args) if i>0 and args[i-1]=='-v']!r}"
+        )
+
+
 class TestStartContainerArgs:
     """Drive the full start_container code path (without invoking docker) and
     assert the assembled `docker run` args contain the correct projects bind
