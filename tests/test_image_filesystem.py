@@ -115,6 +115,49 @@ def test_default_user_in_container_is_claude():
     assert proc.stdout.strip() == "claude"
 
 
+def test_claude_user_can_write_to_projects_bind_mount_target():
+    """Regression guard for session transcript loss.
+
+    When docker bind-mounts a host dir into /home/claude/.claude/projects/
+    /<encoded-cwd>, the in-container mount destination is sometimes
+    surfaced as root-owned (depending on host filesystem state and timing).
+    claude (UID 1000) then can't write its transcript there, sessions are
+    silently lost, and `claude -c` outside the container fails with
+    'No conversation found'.
+
+    fix-mount-perms.sh must chown root-owned bind-mount targets under
+    /home/claude/.claude/projects/ to claude.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        # Skip mkdir on host to force Docker to create the source as root,
+        # which mirrors the real failure mode.
+        host_projects = Path(tmp) / "projects"
+        host_projects.mkdir()
+        # Note: NOT creating the encoded subdir — Docker will auto-create.
+        encoded = "-Users-fake-worktree"
+        # Use --user root to coerce the bind mount target to root ownership,
+        # reliably reproducing the bug regardless of Docker Desktop quirks.
+        proc = _run(
+            "docker", "run", "--rm",
+            "-v", f"{host_projects / encoded}:/home/claude/.claude/projects/{encoded}",
+            "--user", "root",  # forces root-owned mount target
+            "--entrypoint", "bash",
+            IMAGE,
+            "-c",
+            # Drop privileges to claude AFTER the bind mount destination is
+            # established as root, then run the perm fix-up and try writing.
+            f"/usr/local/bin/fix-mount-perms.sh && "
+            f"sudo -u claude touch /home/claude/.claude/projects/{encoded}/test-session.jsonl && echo OK",
+            check=False,
+        )
+        assert proc.returncode == 0, (
+            "claude user cannot write a session transcript to the projects "
+            "bind-mount target. fix-mount-perms.sh did not chown the "
+            "/home/claude/.claude/projects/<encoded> dir to claude.\n"
+            f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+        )
+
+
 def test_claude_user_can_write_under_gitdir_parent_in_worktree_layout():
     """Regression guard for tools that traverse to the main repo path.
 
