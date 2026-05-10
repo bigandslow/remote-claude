@@ -56,6 +56,29 @@ def _get_worktree_info(workspace_path: Path) -> Optional[tuple[Path, str]]:
 _TEMP_FILES_TO_CLEANUP: set[str] = set()
 
 
+def _read_oauth_token(token_file: Path) -> Optional[str]:
+    """Read an OAuth token from a file, sanitizing whitespace.
+
+    Tokens are passed to docker as `-e CLAUDE_CODE_OAUTH_TOKEN=...`, so any
+    embedded newlines or carriage returns make the env var malformed and
+    cause silent auth failures (claude falls back to interactive login).
+
+    Reasons the file might contain stray whitespace:
+      - Wrapped paste: terminals break long tokens across lines.
+      - CRLF line endings from a Windows copy-paste or editor.
+      - Trailing newline from `echo "$token" > file` (always added).
+
+    Returns the cleaned token, or None if the file is missing or empty
+    after stripping whitespace.
+    """
+    if not token_file.exists():
+        return None
+    content = token_file.read_text()
+    # Remove all whitespace (spaces, tabs, CR, LF). Tokens never contain whitespace.
+    cleaned = "".join(content.split())
+    return cleaned or None
+
+
 def _claude_projects_encoded_name(workspace_path: Path, is_worktree: bool) -> str:
     """Return the directory name claude uses under ~/.claude/projects/ for a workspace.
 
@@ -638,15 +661,16 @@ class DockerManager:
         setup_token_file = creds.claude / ".setup-token"
         credentials_file = creds.claude / ".credentials.json"
 
-        oauth_token = None
-        if setup_token_file.exists():
-            # Use long-lived setup token (generated via `claude setup-token`)
-            oauth_token = setup_token_file.read_text().strip()
-        elif credentials_file.exists():
-            # Fall back to credentials.json token
+        # Use long-lived setup token if present; otherwise fall back to the
+        # access token in credentials.json. Both pass through _read_oauth_token-
+        # style sanitization so wrapped-paste or CRLF tokens don't sneak through.
+        oauth_token = _read_oauth_token(setup_token_file)
+        if not oauth_token and credentials_file.exists():
             try:
                 cred_data = json.loads(credentials_file.read_text())
-                oauth_token = cred_data.get("claudeAiOauth", {}).get("accessToken")
+                raw = cred_data.get("claudeAiOauth", {}).get("accessToken")
+                if raw:
+                    oauth_token = "".join(str(raw).split()) or None
             except (json.JSONDecodeError, KeyError):
                 pass
 

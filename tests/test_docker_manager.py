@@ -99,6 +99,54 @@ class TestProjectsBindMount:
         assert str(source) == str(host_projects_root / encoded)
 
 
+class TestSetupTokenReading:
+    """Reading ~/.claude/.setup-token must produce a clean single-line token,
+    even if the file has stray whitespace or a wrapped paste with embedded
+    newlines. Otherwise docker run gets `-e CLAUDE_CODE_OAUTH_TOKEN=multi\nline`,
+    which either fails the run or sends a malformed token to claude — making
+    new sessions silently prompt for login.
+    """
+
+    def test_reads_clean_token_unchanged(self, tmp_path):
+        from lib.docker_manager import _read_oauth_token
+
+        token = "sk-ant-oat01-abc123-veryLongTokenString"
+        f = tmp_path / ".setup-token"
+        f.write_text(token + "\n")
+        assert _read_oauth_token(f) == token
+
+    def test_strips_internal_whitespace_from_wrapped_paste(self, tmp_path):
+        """Pasted tokens often wrap at terminal width. The pieces become
+        separate lines in the file but conceptually they're one token."""
+        from lib.docker_manager import _read_oauth_token
+
+        wrapped = "sk-ant-oat01-abc\n123-veryLongTokenString"
+        expected = "sk-ant-oat01-abc123-veryLongTokenString"
+        f = tmp_path / ".setup-token"
+        f.write_text(wrapped + "\n")
+        assert _read_oauth_token(f) == expected
+
+    def test_strips_carriage_returns(self, tmp_path):
+        """A file edited on Windows or pasted from a tool that uses CRLF."""
+        from lib.docker_manager import _read_oauth_token
+
+        f = tmp_path / ".setup-token"
+        f.write_text("sk-ant-token\r\n")
+        assert _read_oauth_token(f) == "sk-ant-token"
+
+    def test_returns_none_for_missing_file(self, tmp_path):
+        from lib.docker_manager import _read_oauth_token
+
+        assert _read_oauth_token(tmp_path / "does-not-exist") is None
+
+    def test_returns_none_for_empty_file(self, tmp_path):
+        from lib.docker_manager import _read_oauth_token
+
+        f = tmp_path / ".setup-token"
+        f.write_text("\n   \n")  # only whitespace
+        assert _read_oauth_token(f) is None
+
+
 class TestClaudeJsonMount:
     """The host's ~/.claude.json should not be bind-mounted RW at the
     canonical container path. Doing so causes:

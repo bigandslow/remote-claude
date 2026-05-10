@@ -105,8 +105,10 @@ class CloudDockerManager(DockerManager):
         # Claude.json (OAuth)
         args.extend(["-v", f"{remote_claude_json}:/home/claude/.claude.json"])
 
-        # Extract OAuth token for login bypass
-        # Read from remote node
+        # Extract OAuth token for login bypass. Strip ALL whitespace from the
+        # token (not just trim) — wrapped pastes and CRLF in the source file
+        # would otherwise produce a malformed `-e CLAUDE_CODE_OAUTH_TOKEN=...`
+        # env var that fails docker run or sends a broken token to claude.
         oauth_token = None
         result = subprocess.run(
             ["ssh", *SSH_OPTS, self._ssh_host, "cat", f"{remote_claude}/.setup-token"],
@@ -114,9 +116,11 @@ class CloudDockerManager(DockerManager):
             text=True,
             check=False,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            oauth_token = result.stdout.strip()
-        else:
+        if result.returncode == 0:
+            cleaned = "".join(result.stdout.split())
+            if cleaned:
+                oauth_token = cleaned
+        if not oauth_token:
             result = subprocess.run(
                 ["ssh", *SSH_OPTS, self._ssh_host, "cat", f"{remote_claude}/.credentials.json"],
                 capture_output=True,
@@ -126,7 +130,9 @@ class CloudDockerManager(DockerManager):
             if result.returncode == 0:
                 try:
                     cred_data = json.loads(result.stdout)
-                    oauth_token = cred_data.get("claudeAiOauth", {}).get("accessToken")
+                    raw = cred_data.get("claudeAiOauth", {}).get("accessToken")
+                    if raw:
+                        oauth_token = "".join(str(raw).split()) or None
                 except (json.JSONDecodeError, KeyError):
                     pass
 
